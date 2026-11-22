@@ -64,3 +64,49 @@ description: >-
 - 进度用状态清单，改动用两列表，方案用横向对比表。派发结束注明「尚未验收」。
 - 单轮墙钟 >5 分钟且本轮工具调用 >5 次时，开头各用一句写 `当前需求` / `走过的路` / `现在的状态` / `待你决定`（无则写「无」）。后台等待时间不计。
 - 可选外部增强：最终回复在当前环境已安装 `long-answer-html` 时按该技能分流，未安装则按常规回复。
+
+## 七、总入口路由与核心工程底线
+
+### 核心工程底线
+
+1. **需求与最小改动先行。** 重述用户目标与满足它的最小可行改动，优先删减，克制新增抽象与分层。
+2. **领域与数据结构先行。** 写逻辑前先定核心类型、状态机、表／注册表与并发共享边界，消除散落布尔值与跨文件隐式假设。
+3. **先减后加。** 先删死代码、单调用方包装与孤儿引用，再在更简单的结构上构建。
+4. **降低读者认知负担。** 控制调用层数与隐式状态，缩小可变作用域，拆成可验证的小单元逐个推进。
+5. **用实证验收。** 用真实运行界面或产物证明有效。编译通过、lint 或单测都不足以独立验收运行行为。
+6. **修复根因。** 沿症状回溯到系统首次出错点并修复，无运行时证据支撑的防御兜底一律回滚。
+7. **范围内可逆工作自主推进。** 改变公共接口、扩大影响面或执行不可逆操作前，停下请用户拍板。
+8. **诚实说 No。** 发现前提错误、需求矛盾或无证据声称时，直接反驳并给出真实判断。
+
+### 按需剧本
+
+匹配任务后，**先读对应剧本再拆任务与写 brief**。初始上下文不全量预读七篇。若七篇均不匹配，按常规 `subagent-first` 拆解。
+
+剧本沿用前六节的分工与门禁。Coordinator 按需派 `scout` 与 `plan`，为 `worker` 和 `reviewer` 按矩阵选 Codex／Native，落实写前基线和 Review Gate，并在多路并发写或长耗时多阶段接力时按需启用 `monitor`。验收后由 Coordinator 独占 `git add -- <明确路径>` 与 `git commit`。
+
+| 剧本 | 触发场景 | 路径 |
+|---|---|---|
+| Bug 修复 | 已有行为出现错误或回归 | [`playbooks/bug-fix.md`](playbooks/bug-fix.md) |
+| 功能开发 | 新增能力或改变预期行为 | [`playbooks/feature.md`](playbooks/feature.md) |
+| 重构 | 保持行为并调整代码结构 | [`playbooks/refactoring.md`](playbooks/refactoring.md) |
+| 调研 | 只读查证结构、运行链路或设计动机 | [`playbooks/investigation.md`](playbooks/investigation.md) |
+| 技能编写 | 在任意仓库或插件中编写或修订 `SKILL.md` | [`playbooks/authoring-a-skill.md`](playbooks/authoring-a-skill.md) |
+| 性能问题 | 定位性能瓶颈或验证性能优化 | [`playbooks/perf-issue.md`](playbooks/perf-issue.md) |
+| 原型 | 用一次性实验比较候选设计 | [`playbooks/prototype.md`](playbooks/prototype.md) |
+
+### 独立高频技能速查
+
+以下技能可在单代理模式独立触发，也可按需在 Swarm brief 中按名称或路径引用。
+
+| 技能 | 定位 | 路径 |
+|---|---|---|
+| `how` | 代码结构与运行链路追踪 | [`../how/SKILL.md`](../how/SKILL.md) |
+| `why` | Git 历史与设计动机溯源 | [`../why/SKILL.md`](../why/SKILL.md) |
+| `teach` | 面向人的系统讲解与概念梳理 | [`../teach/SKILL.md`](../teach/SKILL.md) |
+| `architect` | 跨边界模块定型与接口设计 | [`../architect/SKILL.md`](../architect/SKILL.md) |
+| `blast-radius` | 变更影响面与依赖波及分析 | [`../blast-radius/SKILL.md`](../blast-radius/SKILL.md) |
+| `interrogate` | 有争议设计的对抗式拷问与收敛 | [`../interrogate/SKILL.md`](../interrogate/SKILL.md) |
+| `unslop` | 散文、报告与回复去水精炼 | [`../unslop/SKILL.md`](../unslop/SKILL.md) |
+| `ketchup` | 长会话或中断后快速上下文追赶 | [`../ketchup/SKILL.md`](../ketchup/SKILL.md) |
+| `correct` | 纠偏与错误前提反驳后的路径修正 | [`../correct/SKILL.md`](../correct/SKILL.md) |
+| `sharpen` | 需求、指令与验收标准的精准化打磨 | [`../sharpen/SKILL.md`](../sharpen/SKILL.md) |

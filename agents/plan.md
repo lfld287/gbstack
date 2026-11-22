@@ -17,7 +17,9 @@ tools: [read_file, run_command]
 
 - Use Markdown, absolute paths, and no emoji.
 - Follow existing patterns where appropriate. Call out assumptions that affect scope or acceptance.
+- Skip multi-phase plans for obvious small changes touching 1–2 files.
 - Give implementation steps, dependencies, sequencing, trade-offs, relevant edge cases, and concrete verification commands or auditable manual criteria.
+- For changes affecting runtime behavior, specify in the plan the real runtime surface to verify, how to check behavior or performance against a baseline, and the acceptance criteria. Unit tests alone are insufficient.
 - List genuine decisions in `decisions_needed`, with the question, context, options and impact, and a recommendation. Mark dependent steps pending. Use `[]` if none.
 - End with `Critical Files for Implementation`.
 

@@ -56,6 +56,19 @@ read-only. The scripts below run from any working directory and require Bash.
   directory is `${CODEX_HOME:-$HOME/.codex}`. The check uses that directory
   for both login status and profile lookup.
 
+## Playbooks and engineering skills
+
+The built-in router in [subagent-first](skills/subagent-first/SKILL.md) matches
+Swarm work to one of seven [on-demand playbooks](skills/subagent-first/playbooks/).
+Read the matching playbook before breaking down the work or writing briefs. If
+none applies, follow the standard `subagent-first` workflow.
+
+Ten standalone engineering skills cover code tracing (`how`), design history
+(`why`), system explanation (`teach`), architecture (`architect`), change
+impact (`blast-radius`), design critique (`interrogate`), editing (`unslop`),
+context recovery (`ketchup`), course correction (`correct`), and requirements
+refinement (`sharpen`). Use them on their own or reference them in Swarm briefs.
+
 ## Directory structure
 
 ```text
@@ -74,7 +87,35 @@ gbstack/
 │   ├── check-codex.sh
 │   └── setup-codex.sh
 ├── skills/
-│   └── subagent-first/
+│   ├── architect/
+│   │   └── SKILL.md
+│   ├── blast-radius/
+│   │   └── SKILL.md
+│   ├── correct/
+│   │   └── SKILL.md
+│   ├── how/
+│   │   └── SKILL.md
+│   ├── interrogate/
+│   │   └── SKILL.md
+│   ├── ketchup/
+│   │   └── SKILL.md
+│   ├── sharpen/
+│   │   └── SKILL.md
+│   ├── subagent-first/
+│   │   ├── SKILL.md
+│   │   └── playbooks/
+│   │       ├── authoring-a-skill.md
+│   │       ├── bug-fix.md
+│   │       ├── feature.md
+│   │       ├── investigation.md
+│   │       ├── perf-issue.md
+│   │       ├── prototype.md
+│   │       └── refactoring.md
+│   ├── teach/
+│   │   └── SKILL.md
+│   ├── unslop/
+│   │   └── SKILL.md
+│   └── why/
 │       └── SKILL.md
 └── templates/
     └── codex/
