@@ -1,0 +1,8 @@
+{
+  "name": "gbstack",
+  "version": "1.0.0",
+  "displayName": "GBStack",
+  "description": "On-demand Swarm Coordinator rules, the subagent-first workflow, four specialized roles (scout, plan, worker, reviewer), and Codex profile templates with setup and preflight scripts.",
+  "homepage": "https://github.com/lfld287/gbstack",
+  "repository": "https://github.com/lfld287/gbstack"
+}
