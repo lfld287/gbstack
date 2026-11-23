@@ -80,7 +80,7 @@ description: >-
 
 ### 按需剧本
 
-匹配任务后，**先读对应剧本再拆任务与写 brief**。初始上下文不全量预读七篇。若七篇均不匹配，按常规 `subagent-first` 拆解。
+匹配任务后，**先读对应剧本再拆任务与写 brief**。初始上下文不全量预读八篇。若八篇均不匹配，按常规 `subagent-first` 拆解。
 
 剧本沿用前六节的分工与门禁。Coordinator 按需派 `scout` 与 `plan`，为 `worker` 和 `reviewer` 按矩阵选 Codex／Native，落实写前基线和 Review Gate，并在多路并发写或长耗时多阶段接力时按需启用 `monitor`。验收后由 Coordinator 独占 `git add -- <明确路径>` 与 `git commit`。
 
@@ -90,6 +90,7 @@ description: >-
 | 功能开发 | 新增能力或改变预期行为 | [`playbooks/feature.md`](playbooks/feature.md) |
 | 重构 | 保持行为并调整代码结构 | [`playbooks/refactoring.md`](playbooks/refactoring.md) |
 | 调研 | 只读查证结构、运行链路或设计动机 | [`playbooks/investigation.md`](playbooks/investigation.md) |
+| PR 讲解与审查 | 讲解 PR 做了什么（how/why）并审查 bug 与改进点 | [`playbooks/pr-review.md`](playbooks/pr-review.md) |
 | 技能编写 | 在任意仓库或插件中编写或修订 `SKILL.md` | [`playbooks/authoring-a-skill.md`](playbooks/authoring-a-skill.md) |
 | 性能问题 | 定位性能瓶颈或验证性能优化 | [`playbooks/perf-issue.md`](playbooks/perf-issue.md) |
 | 原型 | 用一次性实验比较候选设计 | [`playbooks/prototype.md`](playbooks/prototype.md) |

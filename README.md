@@ -59,7 +59,7 @@ read-only. The scripts below run from any working directory and require Bash.
 ## Playbooks and engineering skills
 
 The built-in router in [subagent-first](skills/subagent-first/SKILL.md) matches
-Swarm work to one of seven [on-demand playbooks](skills/subagent-first/playbooks/).
+Swarm work to one of eight [on-demand playbooks](skills/subagent-first/playbooks/).
 Read the matching playbook before breaking down the work or writing briefs. If
 none applies, follow the standard `subagent-first` workflow.
 
@@ -109,6 +109,7 @@ gbstack/
 │   │       ├── feature.md
 │   │       ├── investigation.md
 │   │       ├── perf-issue.md
+│   │       ├── pr-review.md
 │   │       ├── prototype.md
 │   │       └── refactoring.md
 │   ├── teach/
