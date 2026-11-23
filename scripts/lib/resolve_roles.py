@@ -271,7 +271,8 @@ class Resolver:
             for key in ("reworkModel", "lowQuotaFallback", "lowQuotaFallbackProvider"):
                 self.expect(native, native_path, key, str, optional=True)
             resolved["native"] = dict(native)
-            resolved["native"].setdefault("reworkModel", model)
+            if resolved["native"].get("reworkModel") is None:
+                resolved["native"]["reworkModel"] = model
         if codex is not None:
             self.register_profiles(role_id, codex, readonly, mode, native)
         prompt = role.get("prompt", f"{role_id}.md")
@@ -287,6 +288,8 @@ class Resolver:
         extra = self.expect(codex, path, "extraProfiles", list, optional=True) or []
         self.expect(codex, path, "provider", str, optional=mode != "codex")
         sandbox = self.expect(codex, path, "sandbox", str, optional=profile is None and not extra)
+        if sandbox is not None and sandbox not in ("read-only", "workspace-write"):
+            self.invalid((*path, "sandbox"), "expected 'read-only' or 'workspace-write'")
         for key in ("outerModel", "outerLowQuotaFallback"):
             self.expect(codex, path, key, str, optional=True)
         for flag in NATIVE_FALLBACK_FLAGS:
@@ -294,7 +297,8 @@ class Resolver:
                 field = (*path, flag)
                 self.invalid(field, "requires a native configuration",
                              self.latest_source(field, ("roles", role_id, "native")))
-        if readonly and sandbox != "read-only":
+        if (readonly and sandbox != "read-only"
+                and (mode == "codex" or profile is not None or extra or sandbox is not None)):
             field = (*path, "sandbox")
             self.invalid(field, "readonly roles require the read-only sandbox",
                          self.latest_source(field, ("roles", role_id, "readonly")))
@@ -308,6 +312,8 @@ class Resolver:
             if name in seen:
                 self.invalid(field, f"duplicate Codex profile: {name}")
             seen.add(name)
+            if mode != "codex":
+                continue
             entry = self.profiles.setdefault(name, {"sandbox": sandbox, "roles": [], "field": field})
             if entry["sandbox"] != sandbox:
                 other = entry["roles"][0]
@@ -320,9 +326,14 @@ class Resolver:
         path = ("reviews", review_id)
         if not isinstance(review, dict):
             self.invalid(path, "expected a review object or null")
-        for key in ("description", "onMissingProvider", "onIncomplete"):
-            self.expect(review, path, key, str, optional=True)
-        self.expect(review, path, "maxRounds", int, optional=True)
+        self.expect(review, path, "description", str, optional=True)
+        for key in ("onMissingProvider", "onIncomplete"):
+            value = self.expect(review, path, key, str, optional=True)
+            if value is not None and value not in ("block", "mark-incomplete"):
+                self.invalid((*path, key), "expected 'block' or 'mark-incomplete'")
+        rounds = self.expect(review, path, "maxRounds", int, optional=True)
+        if rounds is not None and rounds < 1:
+            self.invalid((*path, "maxRounds"), "must be at least 1")
         members = self.expect(review, path, "members", list)
         minimum = self.expect(review, path, "minDistinctProviders", int)
         distinct = self.expect(review, path, "requireDistinctProviders", bool, optional=True)
@@ -345,13 +356,13 @@ class Resolver:
             self.invalid((*path, "minDistinctProviders"), "must be between 1 and the number of members")
         providers = {member: role["effectiveProvider"] for member, role in member_roles.items()}
         unique_providers = list(dict.fromkeys(providers.values()))
+        provider_fields = [("roles", name, role["mode"], "provider") for name, role in member_roles.items()]
         if distinct and len(unique_providers) < minimum:
             field = (*path, "minDistinctProviders")
-            provider_fields = [("roles", name, role["mode"], "provider") for name, role in member_roles.items()]
             source = self.latest_source(field, (*path, "members"), (*path, "requireDistinctProviders"),
                                         *provider_fields)
             self.invalid(field, f"only {len(unique_providers)} distinct providers are available", source)
-        if distinct and allow_fallback is False:
+        if distinct and allow_fallback is not True:
             for member, role in member_roles.items():
                 if role["mode"] != "native" or role["native"].get("lowQuotaFallback") is None:
                     continue
@@ -360,15 +371,19 @@ class Resolver:
                 if fallback is None:
                     self.invalid(field, f"required for Native fallback in review {review_id!r}",
                                  self.latest_source(field, ("roles", member, "native", "lowQuotaFallback")))
-                fallback_providers = {fallback}
-                fallback_providers.update(provider for name, provider in providers.items() if name != member)
-                if len(fallback_providers) < minimum:
-                    self.invalid(field, f"fallback would leave too few distinct providers in review {review_id!r}")
+                other_providers = {provider for name, provider in providers.items() if name != member}
+                if fallback in other_providers or len(other_providers | {fallback}) < minimum:
+                    source = self.latest_source(
+                        field, ("roles", member, "native", "lowQuotaFallback"), (*path, "members"),
+                        (*path, "minDistinctProviders"), (*path, "requireDistinctProviders"),
+                        (*path, "allowSameProviderFallback"), *provider_fields,
+                    )
+                    self.invalid(field, f"fallback would reuse a provider or leave too few distinct providers "
+                                        f"in review {review_id!r}", source)
         profiles = {}
         for role in member_roles.values():
             if role["requiresCodexPreflight"]:
-                codex = role["codex"]
-                profiles.update(dict.fromkeys([codex["profile"], *(codex.get("extraProfiles") or [])]))
+                profiles[role["codex"]["profile"]] = None
         return dict(
             review, id=review_id, distinctProviders=unique_providers, requiresCodexPreflight=bool(profiles),
             codexProfiles=list(profiles), memberRoles=list(member_roles.values()),

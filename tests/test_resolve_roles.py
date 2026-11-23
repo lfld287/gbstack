@@ -137,6 +137,11 @@ class ResolveRolesTest(unittest.TestCase):
         })
         self.assertEqual(council["maxRounds"], 3)
 
+    def test_null_rework_model_uses_native_model(self):
+        self.config(self.project_config, self.role("worker", native={"reworkModel": None}))
+        worker = self.success("--project-config-dir", self.project_dir, "role", "worker")
+        self.assertEqual(worker["native"]["reworkModel"], worker["native"]["model"])
+
     def test_config_merge_and_asset_priority(self):
         user_prompt = self.write(self.user_dir / "agents" / "worker.md", "user")
         project_prompt = self.write(self.project_dir / "agents" / "worker.md", "project")
@@ -351,6 +356,22 @@ class ResolveRolesTest(unittest.TestCase):
         self.assertEqual((tsv.returncode, tsv.stdout, tsv.stderr),
                          (0, "Custom.v2\t" + str(user_template) + "\tuser\nno-template\t\t\n", ""))
 
+    def test_native_roles_do_not_register_inherited_codex_profiles(self):
+        self.config(self.project_config, {"roles": {
+            "worker": {"mode": "native"},
+            "reviewer-codex": {"mode": "native", "native": {"provider": "test", "model": "test-model"}},
+            "scout": {"codex": {}},
+        }})
+        self.assertEqual(self.success("--project-config-dir", self.project_dir, "codex-profiles"), [])
+
+    def test_review_codex_profiles_exclude_extra_profiles(self):
+        extra = "reviewer-extra"
+        self.config(self.project_config, self.role("reviewer-codex", codex={"extraProfiles": [extra]}))
+        options = ("--project-config-dir", self.project_dir)
+        review = self.success(*options, "review", "council")
+        self.assertEqual(review["codexProfiles"], ["reviewer-codex"])
+        self.assertEqual([entry["profile"] for entry in self.success(*options, "codex-profiles")], [*PROFILES, extra])
+
     def test_tsv_rejects_control_characters_without_partial_output(self):
         for char in ["\t", "\n", "\r"]:
             with self.subTest(char=repr(char)):
@@ -424,7 +445,10 @@ class ResolveRolesTest(unittest.TestCase):
             (self.role("worker", native=None), "$.roles.worker.codex.fallbackToNativeOnPreflightFail"),
             (self.role("worker", native=None, codex={"fallbackToNativeOnPreflightFail": False}),
              "$.roles.worker.codex.fallbackToNativeOnTransientFailure"),
+            (self.role("worker", codex={"sandbox": "danger-full-access"}), "$.roles.worker.codex.sandbox"),
+            (self.role("worker", mode="native", codex={"sandbox": "invalid"}), "$.roles.worker.codex.sandbox"),
             (self.role("reviewer-codex", codex={"sandbox": "workspace-write"}), "$.roles.reviewer-codex.codex.sandbox"),
+            (self.role("scout", codex={"sandbox": "workspace-write"}), "$.roles.scout.codex.sandbox"),
             (self.role("worker", codex={"profile": "bad/profile"}), "$.roles.worker.codex.profile"),
             (self.role("worker", codex={"extraProfiles": ["x" * 65]}), "$.roles.worker.codex.extraProfiles[0]"),
             (self.role("worker", codex={"extraProfiles": ["worker-codex"]}), "$.roles.worker.codex.extraProfiles[0]"),
@@ -457,6 +481,33 @@ class ResolveRolesTest(unittest.TestCase):
                     "lowQuotaFallback": "fallback", "lowQuotaFallbackProvider": provider,
                 }), "validate")
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_review_rejects_same_provider_fallback_even_when_minimum_is_met(self):
+        default = json.loads((ROOT / "config" / "roles.default.json").read_text())
+        default["roles"]["reviewer-claude"]["native"].update(
+            lowQuotaFallback="fallback", lowQuotaFallbackProvider="openai",
+        )
+        council = default["reviews"]["council"]
+        council["minDistinctProviders"] = 2
+        del council["allowSameProviderFallback"]
+        default_config = self.config(self.base / "default.json", default)
+        options = ("--default-config", default_config)
+        field = "$.roles.reviewer-claude.native.lowQuotaFallbackProvider"
+        self.failure(self.invoke(*options, "validate"), 1, default_config, field, "council")
+        for value in (None, False, True):
+            with self.subTest(allowSameProviderFallback=value):
+                self.config(self.project_config, {"reviews": {"council": {"allowSameProviderFallback": value}}})
+                result = self.invoke(*options, "--project-config-dir", self.project_dir, "validate")
+                if value is True:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.failure(result, 1, "project", self.project_config, field, "council")
+
+    def test_review_policy_and_round_validation(self):
+        for key, value in (("onMissingProvider", "retry"), ("onIncomplete", "skip"),
+                           ("maxRounds", 0), ("maxRounds", -1)):
+            with self.subTest(key=key, value=value):
+                self.invalid({"reviews": {"council": {key: value}}}, "$.reviews.council." + key)
 
     def test_prompt_validation_and_shadowing(self):
         for prompt in ["missing.md", "../worker.md", "sub/../../worker.md"]:

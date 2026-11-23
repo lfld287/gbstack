@@ -3,28 +3,39 @@ set -eu
 
 usage() {
   printf '%s\n' \
-    'Usage: check-codex.sh [--codex-home DIR] [PROFILE ...]' \
+    'Usage: check-codex.sh [OPTIONS] [PROFILE ...]' \
     'Check Codex login status and profile readability.' \
-    'The default directory is ${CODEX_HOME:-$HOME/.codex}.' \
-    'Default profiles: worker-codex worker-codex-xhigh reviewer-codex' \
+    'Without explicit profiles, use the profiles configured in active roles.' \
+    'Use --codex-home DIR to override ${CODEX_HOME:-$HOME/.codex}.' \
+    'Role options: --cwd DIR, --user-config-dir DIR, --project-config-dir DIR,' \
+    '              --no-user-config, --no-project-config.' \
     'Use -h or --help to show this message.'
 }
 
 CODEX_HOME_DIR=${CODEX_HOME:-$HOME/.codex}
 profiles=()
+resolver_args=()
 while (( $# > 0 )); do
   case $1 in
     -h|--help)
       usage
       exit 0
       ;;
-    --codex-home)
+    --codex-home|--cwd|--user-config-dir|--project-config-dir)
       if [[ $# -lt 2 || -z $2 || $2 == -* ]]; then
-        printf 'Error: --codex-home requires a directory\n' >&2
+        printf 'Error: %s requires a directory\n' "$1" >&2
         exit 2
       fi
-      CODEX_HOME_DIR=$2
+      if [[ $1 == --codex-home ]]; then
+        CODEX_HOME_DIR=$2
+      else
+        resolver_args+=("$1" "$2")
+      fi
       shift 2
+      ;;
+    --no-user-config|--no-project-config)
+      resolver_args+=("$1")
+      shift
       ;;
     -*|''|*/*)
       printf 'Error: invalid argument: %s\n' "$1" >&2
@@ -37,8 +48,23 @@ while (( $# > 0 )); do
   esac
 done
 
-if [[ ${#profiles[@]} -eq 0 ]]; then
-  profiles=(worker-codex worker-codex-xhigh reviewer-codex)
+if (( ${#profiles[@]} == 0 )); then
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  resolver_args+=(codex-profiles --format lines)
+  resolved_profiles=$("$SCRIPT_DIR/resolve-roles.sh" "${resolver_args[@]}") || exit "$?"
+  if [[ -z $resolved_profiles ]]; then
+    printf '%s\n' 'No Codex profiles configured in active roles; skipping Codex check.'
+    exit 0
+  fi
+  rest=$resolved_profiles
+  while [[ -n $rest ]]; do
+    profiles+=("${rest%%$'\n'*}")
+    if [[ $rest == *$'\n'* ]]; then
+      rest=${rest#*$'\n'}
+    else
+      rest=
+    fi
+  done
 fi
 
 CODEX_BIN=$(command -v codex || true)
