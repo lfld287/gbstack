@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "roles": {
+    "coordinator": {
+      "description": "Top-level Swarm coordinator for task breakdown, dispatch, verification, and Git commits.",
+      "prompt": null,
+      "readonly": false,
+      "workspace": "main",
+      "mode": "native",
+      "native": {
+        "provider": "google",
+        "model": "gemini-4-hydrogen-high",
+        "lowQuotaFallback": null
+      },
+      "codex": null
+    },
+    "scout": {
+      "description": "Read-only local reconnaissance, targeted diagnosis, external research, and pre-write baseline collection.",
+      "prompt": "scout.md",
+      "readonly": true,
+      "workspace": "inherit",
+      "mode": "native",
+      "native": {
+        "provider": "google",
+        "model": "gemini-4-hydrogen-medium",
+        "lowQuotaFallback": null
+      },
+      "codex": null
+    },
+    "plan": {
+      "description": "Read-only software architect for exploration and implementation planning.",
+      "prompt": "plan.md",
+      "readonly": true,
+      "workspace": "inherit",
+      "mode": "native",
+      "native": {
+        "provider": "google",
+        "model": "gemini-4-neon-xhigh",
+        "lowQuotaFallback": "claude-opus-5-5-high"
+      },
+      "codex": null
+    },
+    "worker": {
+      "description": "Controlled implementation agent supporting Codex and Native execution modes.",
+      "prompt": "worker.md",
+      "readonly": false,
+      "workspace": "inherit",
+      "concurrentWorkspace": "share",
+      "mode": "codex",
+      "native": {
+        "provider": "google",
+        "model": "gemini-4-hydrogen-high",
+        "reworkModel": "gemini-4-neon-high",
+        "lowQuotaFallback": "claude-sonnet-5-5-high"
+      },
+      "codex": {
+        "provider": "openai",
+        "profile": "worker-codex",
+        "extraProfiles": ["worker-codex-xhigh"],
+        "sandbox": "workspace-write",
+        "outerModel": "gemini-4-hydrogen-medium",
+        "outerLowQuotaFallback": "claude-sonnet-5-5-high",
+        "fallbackToNativeOnPreflightFail": true,
+        "fallbackToNativeOnTransientFailure": true
+      }
+    },
+    "reviewer-gemini": {
+      "description": "Read-only code and design reviewer running on Google Native.",
+      "prompt": "reviewer.md",
+      "readonly": true,
+      "workspace": "inherit",
+      "mode": "native",
+      "native": {
+        "provider": "google",
+        "model": "gemini-4-neon-xhigh",
+        "lowQuotaFallback": null
+      },
+      "codex": null
+    },
+    "reviewer-claude": {
+      "description": "Read-only code and design reviewer running on Claude Native.",
+      "prompt": "reviewer.md",
+      "readonly": true,
+      "workspace": "inherit",
+      "mode": "native",
+      "native": {
+        "provider": "anthropic",
+        "model": "claude-opus-5-5-high",
+        "lowQuotaFallback": null
+      },
+      "codex": null
+    },
+    "reviewer-codex": {
+      "description": "Read-only code and design reviewer running via Codex.",
+      "prompt": "reviewer.md",
+      "readonly": true,
+      "workspace": "inherit",
+      "mode": "codex",
+      "native": null,
+      "codex": {
+        "provider": "openai",
+        "profile": "reviewer-codex",
+        "extraProfiles": [],
+        "sandbox": "read-only",
+        "outerModel": "gemini-4-hydrogen-medium",
+        "outerLowQuotaFallback": "claude-sonnet-5-5-high",
+        "fallbackToNativeOnPreflightFail": false,
+        "fallbackToNativeOnTransientFailure": false
+      }
+    },
+    "monitor": {
+      "description": "Optional Swarm stall monitor powered by built-in swarm_monitor skill.",
+      "prompt": null,
+      "skill": "swarm_monitor",
+      "readonly": true,
+      "workspace": "inherit",
+      "mode": "native",
+      "native": {
+        "provider": "google",
+        "model": "gemini-3.8-flash-low",
+        "lowQuotaFallback": null
+      },
+      "codex": null
+    }
+  },
+  "reviews": {
+    "default": {
+      "description": "Dual Native heterogeneous cross-review for Review Gate, pr-review, and interrogate.",
+      "members": ["reviewer-gemini", "reviewer-claude"],
+      "requireDistinctProviders": true,
+      "minDistinctProviders": 2,
+      "allowSameProviderFallback": false,
+      "onMissingProvider": "mark-incomplete",
+      "onIncomplete": "mark-incomplete"
+    },
+    "codex": {
+      "description": "Non-council user-requested Codex review paired with one Native reviewer.",
+      "members": ["reviewer-codex", "reviewer-gemini"],
+      "requireDistinctProviders": true,
+      "minDistinctProviders": 2,
+      "allowSameProviderFallback": false,
+      "onMissingProvider": "mark-incomplete",
+      "onIncomplete": "mark-incomplete"
+    },
+    "council": {
+      "description": "Three-provider heterogeneous iterative review panel for explicit /council.",
+      "members": ["reviewer-codex", "reviewer-gemini", "reviewer-claude"],
+      "requireDistinctProviders": true,
+      "minDistinctProviders": 3,
+      "allowSameProviderFallback": false,
+      "onMissingProvider": "block",
+      "onIncomplete": "block",
+      "maxRounds": 3
+    }
+  },
+  "slots": {
+    "coordinator": "coordinator",
+    "recon": "scout",
+    "plan": "plan",
+    "implement": "worker",
+    "monitor": "monitor",
+    "review": "default",
+    "interrogate": "default",
+    "codexReview": "codex",
+    "council": "council"
+  }
+}
