@@ -22,14 +22,14 @@ description: >-
 | `scout` | `gemini-4-hydrogen-medium` | — | `inherit` |
 | `plan` | `gemini-4-neon-xhigh` | `claude-opus-5-5-high` | 原生，`inherit` |
 | `worker` | Codex 外层 `gemini-4-hydrogen-medium`，Native 首轮 `gemini-4-hydrogen-high`，Native 返工原地切 `gemini-4-neon-high` | `claude-sonnet-5-5-high` | 单写 `inherit`，并发写 `share` / `branch`；Native 返工沿用原成员名与 `agents/worker.md` |
-| `reviewer` | Codex 外层 `gemini-4-hydrogen-medium`，Native `gemini-4-neon-xhigh` | Codex 外层切 `claude-sonnet-5-5-high`，Native 切 `claude-opus-5-5-high` | `inherit` |
+| `reviewer` | Codex 外层 `gemini-4-hydrogen-medium`，Native `gemini-4-neon-xhigh` | Codex 外层切 `claude-sonnet-5-5-high`，Native 切 `claude-opus-5-5-high` | `inherit`，派 `reviewer-codex` 时按 Review Gate 并行加派 1 名 Native `reviewer` |
 | `monitor` | `gemini-3.8-flash-low` | — | `inherit`，仅多路并发写或长耗时多阶段接力时按需启用 |
 
 - Codex profile 用 `worker-codex`（常规）、`worker-codex-xhigh`（复杂、高风险或返工）或 `reviewer-codex`（`gpt-6.2-astra` xhigh，只读）。
 - 派发 `worker` / `reviewer` 前只读预检。根据当前加载的 `subagent-first` `SKILL.md` 的实际路径向上两级（从所在目录解析 `../..`）取得绝对路径 `<PLUGIN_ROOT>`，运行 `<PLUGIN_ROOT>/scripts/check-codex.sh <profile>`，或做等效的只读检查。
 - 等效检查先用 `command -v codex` 找可执行文件，找不到可执行文件时尝试 `$HOME/.local/bin/codex`。两处均无可执行文件时明确报告并停止本次派发（脚本退出码 `127`）。`codex login status` 须退出 0 且输出含 `Logged in`，所需 profile 须通过 `test -f` 和 `test -r` 检查 `${CODEX_HOME:-$HOME/.codex}/<profile>.config.toml`。在只读环境中执行等效检查，或像随附脚本一样为 Codex 发布版的登录状态查询将 `TMPDIR` 临时设为 Codex home 的物理绝对路径，以阻止创建 PATH 别名。
 - 预检通过后同会话缓存，仅切未检 profile、报错或环境变化时重检。
-- 默认预检通过走 Codex。登录或 profile 检查失败时报告具体缺项并走 Native，环境阻塞按第五节处理。显式 Native 或指定原生模型时跳过预检。显式 Codex 预检失败即停报具体缺项，严禁静默回退。
+- 默认预检通过走 Codex，审查按 Review Gate 双审。默认预检中登录或 profile 检查失败时报告具体缺项，`worker` 走 Native，审查只派 1 名 Native `reviewer`。无可执行文件按上条退出码 `127` 停派，环境阻塞按第五节处理。显式 Native 或指定原生模型时跳过预检，审查也只派 1 名 Native `reviewer`。显式 Codex 预检失败即停报具体缺项，严禁静默回退。
 - 角色文件相对于当前技能目录为 `../../agents/<role>.md`。在 Swarm 业务 brief 开头写入解析后的绝对路径 `<PLUGIN_ROOT>/agents/<role>.md` 并要求成员先读该文件。实现与审查填 `执行模式: Codex` 或 `执行模式: Native`，Codex 另填 profile 与是否为非 Git 目录，隔离写先 `pwd` 取 `-C` 路径。
 - 派发时显式传 `model`（若指定型号不可用，先用 `swarm{action:"models"}` 核对并上报用户确认，禁擅自改派未授权型号；低配额切换按第五节执行）。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
 
@@ -44,10 +44,10 @@ description: >-
 
 ## 四、审查门禁、验收、逐块回退、独占提交与清理
 
-- **Review Gate** 派发前判定，验收发现风险可补派。局部、常规或有自动化测试／构建兜底的改动默认不审。高风险、复杂、涉及核心逻辑或接口、安全、并发、迁移，需验证行为缺少自动验证，或用户要求时派独立 `reviewer`。实现与审查均只向 `@coordinator [done]` 交接。
-- 区分「已返回／待验收」「未通过」「已完成」。核验实际 diff、指定命令真实退出码与输出或人工证据。并发写先合入主工作区再复验总 diff，按需派审。审查阻塞项须全部解决。
+- **Review Gate** 派发前判定，验收发现风险可补派。局部、常规或有自动化测试／构建兜底的改动默认不审。高风险、复杂、涉及核心逻辑或接口、安全、并发、迁移，需验证行为缺少自动验证，或用户要求时派独立 `reviewer`。不可单路采信 `reviewer-codex`，须按矩阵并行加派 1 名 Native `reviewer` 交叉审查，重点防范 Codex 提出无运行时证据的防御兜底（多余空值检查、异常吞咽、假想分支、过度包装）。双审无法完成时按第五节处理。实现与审查均只向 `@coordinator [done]` 交接。
+- 区分「已返回／待验收」「未通过」「已完成」。核验实际 diff、指定命令真实退出码与输出或人工证据。并发写先合入主工作区再复验总 diff，按需派审。Coordinator 汇总审查时逐条判断**是否值得做**，核验运行时证据和真实触发风险，权衡修复收益、引入的复杂度与维护成本。对 Codex 单方提出的无证据防御兜底或低收益项，直接驳回并记录理由。公共接口或行为边界有分歧时交用户拍板。只派 `worker` 修复有实证且值得做的阻塞项，解决后复验。
 - 越界先问理由，按基线逐块回退，禁整文件回退。归属不清则保留并请用户决定。回退后复核改动并重跑验证。
-- 确认停写后单任务最多重试 1 次，仍失败则上报。返工 brief 带当前有效基线。Native 用 `swarm{action:"model", name, model:"gemini-4-neon-high"}` 原地切换并沿用 `worker.md`；Codex 唤醒原 `worker` 并切 `worker-codex-xhigh`。
+- 非审查收口返工（如同因卡死或未推进）确认停写后，单任务最多重试 1 次，仍失败即停止并上报。已有实证推进、只剩经裁决值得修的独立审查局部阻塞项时，单任务另给最多 1 次审查收口返工，不占前述重试额度。收口后仍有任意阻塞项、未推进或复验失败即停止并上报。两类额度均为单任务累计上限，互不挪用，错误变化、新增阻塞项、刷新基线或切换模型均不重置额度。返工 brief 带当前有效基线。Native 用 `swarm{action:"model", name, model:"gemini-4-neon-high"}` 原地切换（已在该模型则沿用），继续用 `worker.md`。Codex 唤醒原 `worker`，切 `worker-codex-xhigh`（已在该 profile 则沿用）。
 - Coordinator 验收后独占 `git add -- <明确路径>` 和 `git commit`。未授权不得 `push`。
 - 集成验收后主动 `kill` 无后续任务的完工业务成员，先确认 `waiting`，需提交时等 `git commit` 成功。只读交付消费后可 `kill`。异常、取消或驳回的隔离工作区先披露并确认去留再 `kill`。
 - 有 `monitor` 时在最终汇报前向面板发送无 `@` 的 `[done] <summary>`。
@@ -56,7 +56,7 @@ description: >-
 
 - 宿主、沙箱、权限或网络等环境阻塞时，外层和 Coordinator 禁止代劳或静默切 Native 绕过限制。上报原始报错、卡点、停写状态、现场残留和选项，等用户拍板。未授权不清理。
 - Gemini 低配额按矩阵用 `swarm{action:"model", name, model}` 原地切换并告知用户，Codex profile 沿用。
-- Codex 内层故障先确认进程退出、停写，只读核对残留并报告退出码及报错。显式锁定 Codex 时保留现场上报。默认路由仅在配额、限流、登录失效或服务暂不可用且确认退出后允许 `reviewer` 切 Native；`worker` 还须确认相对基线零改动。有部分改动则保留现场上报。切 Native 时须同步按矩阵切换原生模型，`reviewer` 用 `gemini-4-neon-xhigh`，`worker` 用 `gemini-4-hydrogen-high`。Gemini 低配额时按矩阵切换对应的 Native Claude 模型。
+- Codex 内层故障先确认进程退出、停写，只读核对残留并报告退出码及报错。双审中，排除本节首条所述的环境阻塞后，仅当默认路由的 Codex `reviewer` 因配额、限流、登录失效或服务暂不可用退出时，才沿用已并行派发的 Native `reviewer`，验收时如实披露 Codex 故障与缺少异构交叉审查，无需补派第二名 Native。环境阻塞按本节首条处理，显式要求 Codex 审查时的故障及其他不符合上述条件的 Codex 审查故障也须上报。这些审查均标 `未审完:`，等用户拍板，禁止按完整通过放行。用户显式锁定仅用 Codex 或双审中 Native 不可用时，保留获授权模式，在 `未审完:` 写明缺少异构交叉审查及原因，交用户决定，禁止按完整通过放行。显式锁定 Codex 的 `worker` 保留现场上报。默认路由的 Codex `worker` 仅在配额、限流、登录失效或服务暂不可用时，确认退出且相对基线零改动后，才按矩阵切对应阶段的 Native 模型（首轮 `gemini-4-hydrogen-high`，返工 `gemini-4-neon-high`，Gemini 低配额切 `claude-sonnet-5-5-high`）。有部分改动则保留现场上报。
 
 ## 六、外部接口与汇报规范
 
