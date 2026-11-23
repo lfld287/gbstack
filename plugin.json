@@ -2,7 +2,7 @@
   "name": "gbstack",
   "version": "1.0.0",
   "displayName": "GBStack",
-  "description": "On-demand Swarm Coordinator rules, the subagent-first workflow with a built-in playbook router and 8 on-demand playbooks, 10 standalone engineering skills, four specialized roles (scout, plan, worker, reviewer), and Codex profile templates with setup and preflight scripts.",
+  "description": "On-demand Swarm Coordinator rules, the subagent-first workflow with a built-in playbook router and 8 on-demand playbooks, 11 standalone engineering skills, four specialized roles (scout, plan, worker, reviewer), and Codex profile templates with setup and preflight scripts.",
   "homepage": "https://github.com/lfld287/gbstack",
   "repository": "https://github.com/lfld287/gbstack"
 }

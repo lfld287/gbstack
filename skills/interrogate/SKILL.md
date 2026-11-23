@@ -17,7 +17,7 @@ description: >-
 
 - 让对抗者独立检查同一快照和意图。使用只读环境或隔离临时副本、worktree。隔离环境须拷入范围内的未提交变更。
 - Swarm 的 `reviewer` 遵循 `agents/reviewer.md`，在任何目录（包括隔离副本和 worktree）都严格只读。禁止落盘脚本、测试夹具或临时产物，只执行无写入副作用的只读检查命令。确需落盘时，由具备写入授权且已核对有效基线的角色在隔离环境预先准备。
-- Swarm 由顶层 Coordinator 按 `skills/subagent-first/SKILL.md` 的授权模型矩阵派发，异构交叉审查默认组合为 Codex `reviewer-codex` 与 Native `gemini-4-neon-xhigh`。仅在 Gemini 低配额时，才可按矩阵将 Native 成员原地切换到 `claude-opus-5-5-high`。禁止为凑异构跳过低配额条件直接选用 Claude。成员只完成自身审查并交回 Coordinator，禁止二次派发。
+- Swarm 由顶层 Coordinator 按 [`../subagent-first/SKILL.md`](../subagent-first/SKILL.md) 的授权模型矩阵派发，异构交叉审查默认组合为 Google Native `gemini-4-neon-xhigh` 与 Claude Native `claude-opus-5-5-high`。常规审查不调用 Codex，免 Codex 预检。任一方不可用、失败或低配额时，禁止静默替换为同提供商模型，按该手册第五节标 `未审完:` 交用户决定。成员只完成自身审查并交回 Coordinator，禁止二次派发。
 - 单机先判定当前代理是否已为被派发成员（如非 Swarm 的 `invoke_subagent` 子代理或 `run_workflow` 步骤）。已派发成员严禁再次调用 `invoke_subagent` 或二次派活，只在当前上下文内独立完成对抗验证并回报调用方。未被派发且已获调用授权时，可在隔离副本或 worktree 中用 `invoke_subagent` 独立挑战，例如分别检查边界输入、状态一致性和回归。无法独立调用时分视角检查，并如实说明来源。
 - 每位对抗者须在自身权限内实际运行测试、复现脚本或检查命令举证。每项只交标题、精确命令、实际输出和意图期望。
 

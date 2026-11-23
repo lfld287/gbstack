@@ -30,10 +30,13 @@ agy plugin install /path/to/gbstack
 
 ## Codex profiles
 
-The Coordinator checks Codex before dispatching a Codex worker or reviewer.
-`worker-codex` is the standard implementation profile,
-`worker-codex-xhigh` is for complex work or rework, and `reviewer-codex` is
-read-only. The scripts below run from any working directory and require Bash.
+The Coordinator checks Codex before dispatching a Codex worker or an explicit
+Codex reviewer (such as council or a user-requested Codex review). Routine
+independent reviews use Gemini and Claude Opus without Codex preflight.
+`worker-codex` is the default implementation profile (used for initial work and
+rework), `worker-codex-xhigh` is opt-in when explicitly requested, and
+`reviewer-codex` is read-only for explicit `council` or user-requested Codex reviews.
+The scripts below run from any working directory and require Bash.
 
 ```sh
 /path/to/gbstack/scripts/setup-codex.sh --dry-run
@@ -63,11 +66,12 @@ Swarm work to one of eight [on-demand playbooks](skills/subagent-first/playbooks
 Read the matching playbook before breaking down the work or writing briefs. If
 none applies, follow the standard `subagent-first` workflow.
 
-Ten standalone engineering skills cover code tracing (`how`), design history
+Eleven standalone engineering skills cover code tracing (`how`), design history
 (`why`), system explanation (`teach`), architecture (`architect`), change
 impact (`blast-radius`), design critique (`interrogate`), editing (`unslop`),
-context recovery (`ketchup`), course correction (`correct`), and requirements
-refinement (`sharpen`). Use them on their own or reference them in Swarm briefs.
+context recovery (`ketchup`), course correction (`correct`), requirements
+refinement (`sharpen`), and multi-provider iterative review (`council`). Use
+them on their own or reference them in Swarm briefs.
 
 ## Directory structure
 
@@ -92,6 +96,8 @@ gbstack/
 │   ├── blast-radius/
 │   │   └── SKILL.md
 │   ├── correct/
+│   │   └── SKILL.md
+│   ├── council/
 │   │   └── SKILL.md
 │   ├── how/
 │   │   └── SKILL.md
