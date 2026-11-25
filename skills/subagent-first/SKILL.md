@@ -18,7 +18,7 @@ description: >-
 
 1. `<PLUGIN_ROOT>/config/roles.default.json`
 2. `${GBSTACK_USER_CONFIG_DIR:-$HOME/.gemini/config/gbstack}/roles.json`
-3. `<repo>/.agents/gbstack/roles.json`（安全边界：默认禁止项目层定义或覆写非 `null` 的 `roles.*.cli`，防止不可信仓库注入命令；确需项目级定义时须显式传 `--allow-project-cli` 或设 `GBSTACK_ALLOW_PROJECT_CLI=1`）
+3. `<repo>/.agents/gbstack/roles.json`（安全边界：默认禁止项目层定义或覆写非 `null` 的 `roles.*.cli`，包括其中的 `rework` / `fallback`，防止不可信仓库注入命令；确需项目级定义时须显式传 `--allow-project-cli` 或设 `GBSTACK_ALLOW_PROJECT_CLI=1`）
 
 会话开始时，Coordinator 必须运行 `<PLUGIN_ROOT>/scripts/resolve-roles.sh --cwd <WORKDIR> dump`。退出码 `1` 表示配置校验失败，停止派发并报告原始错误。解析器报错时先处理错误再派发。派发前以同一 `--cwd` 用 `slot <name>` 解析槽位、`role <id>` 查询角色、`review <id>` 查询审查组，并可用 `cli-roles [--format json|lines]` 列出当前启用的 CLI 角色。`slot` 的 `kind` 指明读取 `role` 还是 `review`，后者用 `review.memberRoles` 获取成员。退出码 `3` 表示查询项缺失或已禁用，按不可用处理并报告受影响的派发。
 
@@ -35,10 +35,10 @@ description: >-
 
 用户可在 `roles.json` 增加、移除或覆盖角色，移除后同步调整引用。自定义角色 ID 可直接通过 `role <id>` 解析并派发。用户显式指定某种外部 CLI 审查（如 `codex`、`pi`、`omp`、`claude`）时，不再通过固定槽位，而是直接按 `resolve-roles.sh role <id>` 或自定义 `review <id>` 解析派发。
 
-- 按解析结果中的 `mode`（`"native"` | `"cli"`）、`readonly`、`workspace` 派发，并发写优先用已配置的 `concurrentWorkspace`，只用 `share` / `branch` 隔离写入。Native 派发显式传 `native.model`。CLI 派发显式传 `cli.outerModel`（默认 `gemini-3.8-flash-medium`）作为薄 Swarm 外层模型，由外层调用 `<PLUGIN_ROOT>/scripts/run-cli.sh` 驱动 `roles.*.cli` 中配置的外部 CLI 执行内层任务。型号不可用时先用 `swarm{action:"models"}` 核对并报告，低配额按第五节切换。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
-- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: CLI` 或 `执行模式: Native`。CLI 模式另填 `ROLE_ID`、`PLUGIN_ROOT`，写入任务附 `--baseline-json`（仅允许 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键，未知键会被 `run-cli.sh` 以退出码 `2` 拒绝）及可选 `--add-dir` / `--timeout`，外层隔离写先 `pwd` 取 `--cwd`。
-- 解析结果的 `requiresCliPreflight` 为真时，在派发前对每个实际使用的 CLI 角色（`cliRoles`）或审查组执行只读预检：运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' (--role <ROLE_ID> | --review <REVIEW_ID> | --all)`，其中 `--review` 必须传 `slot` 解析出的 `review.id`（不可直接传槽位名）。退出码语义：`0` 通过、`1` 预检或配置失败、`2` 参数错误、`3` 缺失或已禁用、`127` 找不到可执行文件（`cli.binary` 及 `cli.fallbackBinaries`）。已通过的 `ROLE_ID` 在同会话缓存，切未检角色、报错或环境变化时重检。
-- 预检失败先报告具体缺项与退出码。仅当 `cli.fallbackToNativeOnPreflightFail` 为真、有 `native` 配置、用户未锁定执行模式且审查组仍满足第四、五节要求时，才改走 Native。无法回退时停止派发该角色。显式指定的 CLI 审查或 `council` 的所需成员预检失败且该标志为假时，停止该轮派发。运行期回退由 `cli.fallbackToNativeOnTransientFailure` 和第五节约束。显式选择 Native 时按实际选定的模式派发，免外部 CLI 预检。
+- 按解析结果中的 `mode`（`"native"` | `"cli"`）、`readonly`、`workspace` 派发，并发写优先用已配置的 `concurrentWorkspace`，只用 `share` / `branch` 隔离写入。Native 派发显式传 `native.model`。CLI 派发按 `CLI_PROFILE`（`default` | `rework` | `fallback`）显式传生效 profile 的 `outerModel` 作为薄 Swarm 外层模型；未覆写时沿用基础 `cli.outerModel`（内置角色用 `gemini-3.8-flash-medium`）。切换 profile 时同步调整外层模型。外层调用 `<PLUGIN_ROOT>/scripts/run-cli.sh --profile <profile>` 驱动内层 CLI，runner 和外层均不得自行重试或切换 profile。型号不可用时先用 `swarm{action:"models"}` 核对并报告，低配额按第五节切换。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
+- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: CLI` 或 `执行模式: Native`。CLI 模式另填 `ROLE_ID`、`PLUGIN_ROOT` 和可选的 `CLI_PROFILE: <profile>`（省略时为 `default`），写入任务附 `--baseline-json`（仅允许 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键，未知键会被 `run-cli.sh` 以退出码 `2` 拒绝）及可选 `--add-dir` / `--timeout`，外层隔离写先 `pwd` 取 `--cwd`。
+- 解析结果的 `requiresCliPreflight` 为真时，在派发前对每个实际使用的 CLI 角色（`cliRoles`）或审查组执行只读预检：运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' (--role <ROLE_ID> | --review <REVIEW_ID> | --all) [--profile <profile>]`。`--profile` 支持 `default`（缺省）、`rework`、`fallback`、`all`；`--review` 必须传 `slot` 解析出的 `review.id`（不可直接传槽位名）。退出码语义：`0` 通过、`1` 预检或配置失败、`2` 参数错误或显式指定的角色未配置 fallback、`3` 缺失或已禁用、`127` 找不到可执行文件（生效 profile 的 `binary` 及 `fallbackBinaries`）。显式使用 `--role <ROLE_ID> --profile fallback` 时，若该角色未配置 `cli.fallback`，退出 `2`。批量使用 `--review <REVIEW_ID>` 或 `--all` 搭配 `--profile fallback` 时，只预检目标范围内已配置 `cli.fallback` 的 CLI 角色，跳过未配置的角色；若没有符合条件的角色，输出跳过提示并退出 `0`。同会话按 `(ROLE_ID, profile)` 缓存通过结果，切到未检组合、报错或环境变化时重检。跳过的角色不得记入 `(ROLE_ID, fallback)` 预检通过缓存。
+- 预检失败先报告具体缺项与退出码，再按顺序处理：① 已配置 `cli.fallback`、当前未在用 `fallback`，且用户未锁定主工具/主模型时，先运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' --role <ROLE_ID> --profile fallback`；通过后在 brief 指定 `CLI_PROFILE: fallback`，让 runner 用 `--profile fallback`，并按生效的 `outerModel` 切换外层模型。② 没有可用的 CLI fallback 时，仅当 `cli.fallbackToNativeOnPreflightFail` 为真、有 `native` 配置且用户未锁定 CLI 执行模式时才改走 Native。审查回退均须满足第四、五节的提供商约束；无可用回退时停止派发该角色并报告，显式指定的 CLI 审查或 `council` 缺少所需成员时停止该轮派发。显式选择 Native 时免外部 CLI 预检。
 
 ## 三、并行协作、轻量基线与自包含 Brief
 
@@ -52,10 +52,12 @@ description: >-
 ## 四、审查门禁、验收、逐块回退、独占提交与清理
 
 - **Review Gate** 派发前判定，验收发现风险可补派。局部、常规或有自动化测试／构建兜底的改动默认不审。高风险、复杂、涉及核心逻辑或接口、安全、并发、迁移、需验证的行为缺少自动验证，或用户要求时，按 `slots.review` 并行派独立只读成员交叉核验。用户显式指定某种外部 CLI 审查时按 `resolve-roles.sh role <id>` 或自定义 `review <id>` 解析派发，显式 `council` 时用 `slots.council`，对抗审查用 `slots.interrogate`。用户显式锁定单一路审查时仅派该路，并在缺少异构覆盖时标 `未审完:`。所有审查均重点防范无运行时证据的防御兜底（多余空值检查、异常吞咽、假想分支、过度包装）。实现与审查均只向 `@coordinator [done]` 交接。
-- 按槽位关联的 `reviews.*` 的 `members` 派发，使用解析后的 `memberRoles`。按 `requireDistinctProviders` 和 `minDistinctProviders` 核对实际审查的提供商覆盖，回退受 `allowSameProviderFallback` 约束。出现缺家或未审完时分别按 `onMissingProvider` 和 `onIncomplete` 处理（见第五节）。复审遵守 `maxRounds` 及下述返工限制。
+- 按槽位关联的 `reviews.*` 的 `members` 派发，使用解析后的 `memberRoles`。按 `requireDistinctProviders` 和 `minDistinctProviders` 核对实际审查的提供商覆盖，CLI 成员以结果摘要中的生效 `provider` 为准，回退受 `allowSameProviderFallback` 约束。出现缺家或未审完时分别按 `onMissingProvider` 和 `onIncomplete` 处理（见第五节）。复审遵守 `maxRounds` 及下述返工限制。
 - 区分「已返回／待验收」「未通过」「已完成」。核验实际 diff、指定命令真实退出码与输出或人工证据。并发写先合入主工作区再复验总 diff，按需派审。Coordinator 汇总审查时逐条判断**是否值得做**，核验运行时证据和真实触发风险，权衡修复收益、引入的复杂度与维护成本。对任一审查方（含显式调用的外部 CLI 审查方）提出的无证据防御兜底或低收益项，直接驳回并记录理由。公共接口或行为边界有分歧时交用户拍板。只派 `worker` 修复有实证且值得做的阻塞项，解决后复验。
 - 越界先问理由，按基线逐块回退，禁整文件回退。归属不清则保留并请用户决定。回退后复核改动并重跑验证。
-- 非审查收口返工（如同因卡死或未推进）确认停写后，单任务最多重试 1 次，仍失败即停止并上报。非 `council` 审查已有实证推进、只剩经裁决值得修的独立审查局部阻塞项时，单任务另给最多 1 次审查收口返工，不占前述重试额度。收口后仍有任意阻塞项、未推进或复验失败即停止并上报。显式 `council` 多轮评议按 [`../council/SKILL.md`](../council/SKILL.md) 的轮次上限执行，其间未推进或复验失败仍受前述非审查返工 1 次上限约束。两类额度均为单任务累计上限，互不挪用，错误变化、新增阻塞项、刷新基线或切换模型均不重置额度。返工 brief 带当前有效基线。Native 保持原角色、成员名与工作区，必要时用 `swarm{action:"model", name, model}` 原地切到 `native.reworkModel`，省略时用 `native.model`。CLI 模式唤醒原成员，继续使用原 `ROLE_ID` 及对应 `roles.*.cli` 配置。
+- 非审查收口返工（如同因卡死或未推进）确认停写后，单任务最多重试 1 次，仍失败即停止并上报。非 `council` 审查已有实证推进、只剩经裁决值得修的独立审查局部阻塞项时，单任务另给最多 1 次审查收口返工，不占前述重试额度。收口后仍有任意阻塞项、未推进或复验失败即停止并上报。显式 `council` 多轮评议按 [`../council/SKILL.md`](../council/SKILL.md) 的轮次上限执行，其间未推进或复验失败仍受前述非审查返工 1 次上限约束。两类额度均为单任务累计上限，互不挪用，错误变化、新增阻塞项、刷新基线或切换模型均不重置额度。返工 brief 带当前有效基线。
+- Native 返工保持原角色、成员名与工作区，必要时用 `swarm{action:"model", name, model}` 原地切到 `native.reworkModel`，省略时用 `native.model`。
+- CLI 返工唤醒原成员并沿用原 `ROLE_ID`。任务若已切到 `fallback`，brief 继续用 `CLI_PROFILE: fallback`，不切回已失败的 profile；否则指定 `CLI_PROFILE: rework`。未配置 `cli.rework` 时，runner 沿用基础 `cli`（`effectiveProfile: default`）。有 `cli.rework` 且 `(ROLE_ID, rework)` 尚未通过会话预检时，先用 `--profile rework` 预检，失败按第二节处理。若生效的 `outerModel` 与当前外层模型不同，Coordinator 用 `swarm{action:"model", name, model}` 原地切换。
 - Coordinator 验收后独占 `git add -- <明确路径>` 和 `git commit`。未授权不得 `push`。
 - 集成验收后主动 `kill` 无后续任务的完工业务成员，先确认 `waiting`，需提交时等 `git commit` 成功。只读交付消费后可 `kill`。异常、取消或驳回的隔离工作区先披露并确认去留再 `kill`。
 - 有 `monitor` 时在最终汇报前向面板发送无 `@` 的 `[done] <summary>`。
@@ -63,9 +65,10 @@ description: >-
 ## 五、环境阻塞与运行期故障恢复
 
 - 宿主、沙箱、权限或网络等环境阻塞时，外层和 Coordinator 禁止代劳或静默切 Native 绕过限制。上报原始报错、卡点、停写状态、现场残留和选项，等用户拍板。未授权不清理。
-- 低配额时，用 `swarm{action:"model", name, model}` 原地切到已配置的 `native.lowQuotaFallback` 或 `cli.outerLowQuotaFallback` 并告知用户。CLI 外层切换沿用原 `ROLE_ID`、内层 CLI 与提供商。Native 审查成员切换前按 `native.lowQuotaFallbackProvider` 核对切换后的覆盖。只有 `allowSameProviderFallback` 明确为真时才可用已由其他成员覆盖的提供商兜底，且仍须满足适用的提供商数量门槛。无法确认或满足覆盖时按缺家处理。
+- 低配额时，Coordinator 优先用 `swarm{action:"model", name, model}` 原地切到已配置的 `native.lowQuotaFallback` 或当前生效 CLI profile 的 `outerLowQuotaFallback` 并告知用户。CLI profile 未覆写时沿用基础 `cli.outerLowQuotaFallback`，显式 `null` 则清除。外层切换不改变 `ROLE_ID`、内层 profile、CLI 或提供商。Native 审查成员切换前按 `native.lowQuotaFallbackProvider` 核对切换后的覆盖。只有 `allowSameProviderFallback` 明确为真时才可用已由其他成员覆盖的提供商兜底，且仍须满足适用的提供商数量门槛。无法确认或满足覆盖时按缺家处理。
 - 缺家时执行 `onMissingProvider`，成员失败、证据不全或未覆盖指定范围时执行 `onIncomplete`。`block` 停下交用户决定，`mark-incomplete` 保留已有获授权结果并标 `未审完:`，说明缺项和原因。两种情况下均不得按完整通过放行，也不得静默替换成员。显式 `council` 另按其[收敛规则](../council/SKILL.md) 执行。
-- CLI 内层故障（`run-cli.sh` 返回非零退出码 `1` / `2` / `3` / `4` / `5` / `124` / `127`）时，先确认进程退出和停写，核对 `GBSTACK_CLI_RESULT_JSON`（`exitCode`、`timedOut`、`emptyOutput`、`readonlyViolation`、`changedFiles`、`outOfScopeFiles`）并只读核对残留，如实报告实际退出码与报错。`readonly` 角色返回 `4`（篡改工作区）、`5`（空输出）或 `124`（超时）必须标 `未审完:`，严禁外层代审或代写。环境阻塞按本节首条处理。仅在 `cli.fallbackToNativeOnTransientFailure` 为真、有 `native` 配置、用户未锁定 CLI 模式、且确认是配额、限流、登录失效或服务暂不可用等瞬时故障并相对基线零改动（`changedFiles` 为空）时，才可用 `native.model`（返工用 `native.reworkModel`）回退。审查回退还须满足提供商覆盖和回退约束，否则按缺家或未审完处理。有部分改动则保留现场上报。
+- CLI 内层故障时，先确认进程退出和停写，核对 `GBSTACK_CLI_RESULT_JSON`（`profile`、`effectiveProfile`、`provider`、`exitCode`、`timedOut`、`emptyOutput`、`readonlyViolation`、`changedFiles`、`outOfScopeFiles`）并只读核对残留，如实报告实际退出码与报错。只读审查失败、超时、空输出或违反只读要求，必须标 `未审完:`，严禁外层代审或代写。`changedFiles` 非空时，立即保留现场并报告，禁止任何回退。环境阻塞按本节首条处理。
+- 仅当相对基线零改动（`changedFiles` 为空且 diff 为零），并确认是配额、限流、登录失效或服务暂不可用等瞬时故障而非环境阻塞时，Coordinator 才能按顺序回退：① 已配置 `cli.fallback`、当前未在用 `fallback`，且用户未锁定主工具/主模型时，按第二节预检 `--profile fallback`，通过后切换 brief 和 runner 的 profile，并按需切换外层 `outerModel`。② 没有可用的 CLI fallback 时，仅当 `cli.fallbackToNativeOnTransientFailure` 为真、有 `native` 配置且用户未锁定 CLI 执行模式时，才用 `native.model`（返工优先用 `native.reworkModel`）回退。审查回退须满足提供商覆盖和回退约束，否则按缺家或未审完处理。
 
 ## 六、外部接口与汇报规范
 

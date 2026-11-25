@@ -227,6 +227,157 @@ class CliRunnerTest(unittest.TestCase):
         self.assertEqual(council.returncode, 0, council.stderr)
         self.assertIn("reviewer-codex", council.stdout)
 
+    def test_run_profiles_default_rework_and_fallback(self):
+        stub = (
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "print(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read(), "
+            "'env': [os.getenv('BASE_TOKEN'), os.getenv('TOKEN')]}))\n"
+        )
+        primary = self.make_executable(self.bin / "primary", stub)
+        secondary = self.make_executable(self.bin / "secondary", stub)
+        cli = {
+            "binary": str(primary), "provider": "base-provider", "args": ["base"],
+            "env": {"BASE_TOKEN": "present", "TOKEN": "base"},
+            "rework": {"args": ["again"], "env": {"TOKEN": "again"}},
+            "fallback": {"args": ["backup"], "env": {"TOKEN": "backup"}},
+        }
+        options = ("--role", "worker", "--cwd", self.workdir)
+        stdin_args = ["--skip-git-repo-check", "-"]
+        for requested, override, effective, path, provider, argv, stdin, env in [
+            ("default", cli, "default", primary, "base-provider", ["base", *stdin_args], "task", ["present", "base"]),
+            ("rework", cli, "rework", primary, "base-provider", ["again", *stdin_args], "task", ["present", "again"]),
+            ("rework", dict(cli, rework=None), "default", primary, "base-provider",
+             ["base", *stdin_args], "task", ["present", "base"]),
+            ("fallback", cli, "fallback", primary, "base-provider",
+             ["backup", *stdin_args], "task", ["present", "backup"]),
+            ("fallback", dict(cli, fallback={
+                "binary": str(secondary), "provider": "backup-provider", "promptInput": "arg",
+                "promptPrefixArgs": ["-p"], "env": {"TOKEN": "cross-tool"},
+            }), "fallback", secondary, "backup-provider", ["-p", "task"], "", [None, "cross-tool"]),
+        ]:
+            with self.subTest(requested=requested, effective=effective, path=path):
+                self.write_user_config({"roles": {"worker": {"cli": override}}})
+                result = self.run_runner(*options, "--profile", requested, stdin_text="task")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                body, payload = self.parse_runner_output(result.stdout)
+                self.assertEqual(json.loads(body), {"argv": argv, "stdin": stdin, "env": env})
+                self.assertEqual(payload["binary"], str(path))
+                self.assertEqual((payload["profile"], payload["effectiveProfile"], payload["provider"]),
+                                 (requested, effective, provider))
+
+        self.write_user_config({"roles": {"worker": {"cli": dict(cli, fallback=None)}}})
+        for profile, message in [("fallback", "does not configure cli.fallback"), ("all", "invalid choice")]:
+            with self.subTest(profile=profile):
+                # Keep stdin open: rejection must happen before consuming the prompt or checking the baseline.
+                with subprocess.Popen(
+                    [str(RUNNER), *map(str, options), "--profile", profile, "--baseline-json", "not-json"],
+                    cwd=self.workdir, env=self.env, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                ) as proc:
+                    try:
+                        self.assertEqual(proc.wait(timeout=5), 2)
+                        self.assertEqual(proc.stdout.read(), "")
+                        self.assertIn(message, proc.stderr.read())
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+
+    def test_run_never_auto_falls_back_on_failure_or_partial_edits(self):
+        fallback_calls = self.base / "fallback-calls"
+        fallback = self.make_executable(self.bin / "backup", (
+            f"#!/bin/bash\nprintf 'called\\n' >> {shlex.quote(str(fallback_calls))}\n"
+        ))
+        primary = self.make_executable(self.bin / "primary", (
+            "#!/bin/bash\n"
+            "case \"$ACTION\" in\n"
+            "  timeout) exec sleep 20 ;;\n"
+            "  partial) printf 'partial' > partial.txt ;;\n"
+            "esac\n"
+            "exit 1\n"
+        ))
+        self.write_user_config({"roles": {"worker": {"cli": {
+            "binary": str(primary), "args": [], "timeoutSeconds": 1,
+            "fallback": {"binary": str(fallback)},
+        }}}})
+        for action, status, changed in [("fail", 1, []), ("timeout", 124, []), ("partial", 1, ["partial.txt"])]:
+            with self.subTest(action=action):
+                result = self.run_runner("--role", "worker", "--cwd", self.workdir, env=dict(self.env, ACTION=action))
+                self.assertEqual(result.returncode, status, result.stderr)
+                _, payload = self.parse_runner_output(result.stdout)
+                self.assertEqual(payload["exitCode"], status)
+                self.assertEqual(payload["changedFiles"], changed)
+                self.assertEqual((payload["profile"], payload["effectiveProfile"], payload["provider"]),
+                                 ("default", "default", "openai"))
+                self.assertFalse(fallback_calls.exists())
+
+    def test_preflight_profiles_default_rework_fallback_and_all(self):
+        calls = self.base / "preflight-calls"
+        stub = (
+            "#!/bin/bash\n"
+            "value=\"${0##*/}:$1:$TOKEN\"\n"
+            f"printf '%s\\n' \"$value\" >> {shlex.quote(str(calls))}\n"
+            "printf '%s\\n' \"$value\"\n"
+        )
+        self.make_executable(self.bin / "primary", stub)
+        fallback = {"binary": "backup", "env": {"TOKEN": "fallback-cli"}, "preflight": {
+            "command": ["{binary}", "fallback"], "env": {"TOKEN": "fallback-pf"},
+            "outputContains": "backup:fallback:fallback-pf",
+        }}
+        self.write_user_config({"roles": {"reviewer-codex": {"cli": {
+            "binary": "primary", "env": {"TOKEN": "base"},
+            "preflight": {"command": ["{binary}", "default"], "outputContains": "primary:default:base"},
+            "rework": {"env": {"TOKEN": "again"}, "preflight": {"command": ["{binary}", "rework"]}},
+            "fallback": fallback,
+        }}}})
+        role = ("--role", "reviewer-codex")
+        missing = self.run_preflight(*role, "--profile", "fallback")
+        self.assertEqual(missing.returncode, 127, missing.stderr)
+        self.assertIn("backup", missing.stderr)
+        for profile, expected in [("default", "primary:default:base"), ("rework", "primary:rework:again")]:
+            with self.subTest(profile=profile):
+                result = self.run_preflight(*role, "--profile", profile)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls.read_text().splitlines()[-1], expected)
+        unconfigured = self.run_preflight("--role", "worker", "--profile", "fallback")
+        self.assertEqual(unconfigured.returncode, 2, unconfigured.stderr)
+        self.assertIn("does not configure cli.fallback", unconfigured.stderr)
+        native = self.run_preflight("--role", "scout", "--profile", "fallback")
+        self.assertEqual(native.returncode, 1, native.stderr)
+        self.assertIn("'native' mode", native.stderr)
+
+        self.make_executable(self.bin / "backup", stub)
+        for target in (role, ("--review", "council"), ("--all",)):
+            with self.subTest(target=target):
+                calls.unlink(missing_ok=True)
+                result = self.run_preflight(*target, "--profile", "fallback")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls.read_text().splitlines(), ["backup:fallback:fallback-pf"])
+        calls.unlink()
+        result = self.run_preflight(*role, "--profile", "all")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.read_text().splitlines(), [
+            "primary:default:base", "primary:rework:again", "backup:fallback:fallback-pf",
+        ])
+
+        self.write_user_config({"roles": {"worker": {"cli": {
+            "binary": "primary", "env": {"TOKEN": "worker-base"}, "rework": None,
+            "preflight": {"command": ["{binary}", "default"], "outputContains": "primary:default:worker-base"},
+        }}}})
+        calls.unlink()
+        result = self.run_preflight("--role", "worker", "--profile", "rework")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.read_text().splitlines(), ["primary:default:worker-base"])
+
+        self.user_dir.joinpath("roles.json").unlink()
+        calls.unlink()
+        for target in (("--review", "council"), ("--review", "default"), ("--all",)):
+            with self.subTest(target=target):
+                result = self.run_preflight(*target, "--profile", "fallback")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("skipping", result.stdout.lower())
+                self.assertFalse(calls.exists())
+
     def test_run_stdin_vs_arg_non_git_and_extra_dir_args(self):
         argv_log = self.base / "argv.json"
         self.make_executable(
@@ -690,20 +841,22 @@ class CliRunnerTest(unittest.TestCase):
 
     def test_project_cli_boundary_in_preflight_and_runner(self):
         self.make_executable(self.bin / "codex", "#!/bin/bash\nprintf 'Logged in\\n'\n")
-        self.write_project_config({"roles": {"worker": {"cli": {"args": ["--evil"]}}}})
-
-        pre_blocked = self.run_preflight("--role", "worker")
-        self.assertEqual(pre_blocked.returncode, 1)
-        self.assertIn("--allow-project-cli", pre_blocked.stderr)
-
-        run_blocked = self.run_runner("--role", "worker", "--cwd", self.workdir)
-        self.assertEqual(run_blocked.returncode, 1)
-        self.assertIn("--allow-project-cli", run_blocked.stderr)
-
-        pre_ok = self.run_preflight("--role", "worker", "--allow-project-cli")
-        self.assertEqual(pre_ok.returncode, 0, pre_ok.stderr)
-        run_ok = self.run_runner("--role", "worker", "--cwd", self.workdir, "--allow-project-cli")
-        self.assertEqual(run_ok.returncode, 0, run_ok.stderr)
+        for profile, overrides in [
+            ("default", {"args": ["--project"]}),
+            ("rework", {"rework": {"args": ["--project"]}}),
+            ("fallback", {"fallback": {"args": ["--project"]}}),
+            ("rework", {"rework": None}),
+            ("default", {"fallback": None}),
+        ]:
+            self.write_project_config({"roles": {"worker": {"cli": overrides}}})
+            for command in (self.run_preflight, self.run_runner):
+                with self.subTest(overrides=overrides, command=command.__name__):
+                    args = ("--role", "worker", "--cwd", self.workdir, "--profile", profile)
+                    denied = command(*args)
+                    self.assertEqual(denied.returncode, 1, denied.stderr)
+                    self.assertIn("without --allow-project-cli", denied.stderr)
+                    allowed = command(*args, "--allow-project-cli")
+                    self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
     def test_resolve_binary_returns_absolute_path_across_cwd_change(self):
         relbin = self.base / "relbin"

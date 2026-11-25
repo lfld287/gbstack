@@ -55,6 +55,7 @@ class ResolveRolesTest(unittest.TestCase):
             PYTHONDONTWRITEBYTECODE="1",
         )
         self.env.pop("GBSTACK_DEFAULT_CONFIG", None)
+        self.env.pop("GBSTACK_ALLOW_PROJECT_CLI", None)
 
     def invoke(self, *args, env=None, cwd=None, executable=CLI):
         return subprocess.run(
@@ -137,6 +138,8 @@ class ResolveRolesTest(unittest.TestCase):
                 "binary": "codex",
                 "readonly": False,
                 "hasPreflight": True,
+                "hasRework": False,
+                "hasFallback": False,
             },
             {
                 "id": "reviewer-codex",
@@ -144,8 +147,14 @@ class ResolveRolesTest(unittest.TestCase):
                 "binary": "codex",
                 "readonly": True,
                 "hasPreflight": True,
+                "hasRework": False,
+                "hasFallback": False,
             },
         ])
+        for role_id in ("worker", "reviewer-codex"):
+            cli = dump["roles"][role_id]["cli"]
+            self.assertIsNone(cli["rework"])
+            self.assertIsNone(cli["fallback"])
         worker = self.success("role", "worker")
         self.assertEqual(worker, dump["roles"]["worker"])
         self.assertEqual(worker["id"], "worker")
@@ -550,6 +559,268 @@ class ResolveRolesTest(unittest.TestCase):
             with self.subTest(config=config):
                 self.invalid_user(config, path)
 
+    def test_cli_rework_and_fallback_same_binary_inheritance(self):
+        self.config(self.user_config, {"roles": {
+            "worker": {"cli": {
+                "env": {"KEEP": "base", "CHANGE": "base"},
+                "preflight": {"env": {"CHECK": "base"}, "timeoutSeconds": 19},
+                "rework": {
+                    "args": ["--rework"], "env": {"CHANGE": "rework"},
+                    "timeoutSeconds": 35, "outerModel": "rework-model",
+                },
+                "fallback": {
+                    "binary": "codex", "args": None, "promptInput": "arg",
+                    "promptPrefixArgs": ["-p"], "preflight": {"command": ["{binary}", "--version"]},
+                },
+            }},
+            "arg-role": custom_cli_role(promptPrefixArgs=["-p"], rework={"promptInput": "stdin", "stdinArg": "-"}),
+        }})
+        dump = self.success("--user-config-dir", self.user_dir, "dump")
+        cli = dump["roles"]["worker"]["cli"]
+        for field in ("binary", "provider", "fallbackBinaries", "stdinArg", "nonGitArgs", "extraDirArgs", "preflight"):
+            self.assertEqual(cli["rework"][field], cli[field], field)
+        self.assertEqual(cli["rework"]["args"], ["--rework"])
+        self.assertEqual(cli["rework"]["env"], {"KEEP": "base", "CHANGE": "rework"})
+        self.assertEqual(cli["rework"]["timeoutSeconds"], 35)
+        self.assertEqual(cli["rework"]["outerModel"], "rework-model")
+        fallback = cli["fallback"]
+        self.assertEqual(fallback["args"], [])
+        self.assertIsNone(fallback["stdinArg"])
+        self.assertEqual(fallback["promptPrefixArgs"], ["-p"])
+        self.assertEqual(fallback["preflight"], {
+            "command": ["{binary}", "--version"], "env": {}, "timeoutSeconds": 30,
+        })
+        arg_rework = dump["roles"]["arg-role"]["cli"]["rework"]
+        self.assertEqual(arg_rework["promptPrefixArgs"], [])
+        self.assertEqual(arg_rework["stdinArg"], "-")
+        self.assertTrue(dump["cliRoles"][0]["hasRework"])
+        self.assertTrue(dump["cliRoles"][0]["hasFallback"])
+
+    def test_cli_fallback_cross_binary_isolation(self):
+        self.config(self.user_config, self.role("worker", cli={
+            "env": {"BASE_ONLY": "yes"}, "fallback": {"binary": "pi"},
+        }))
+        cli = self.success("--user-config-dir", self.user_dir, "role", "worker")["cli"]
+        fallback = cli["fallback"]
+        self.assertEqual(fallback["binary"], "pi")
+        for field, value in {
+            "fallbackBinaries": [], "args": [], "nonGitArgs": [], "extraDirArgs": [],
+            "stdinArg": None, "promptPrefixArgs": [], "env": {}, "preflight": None,
+        }.items():
+            self.assertEqual(fallback[field], value, field)
+        for field in ("provider", "promptInput", "timeoutSeconds", "outerModel", "outerLowQuotaFallback"):
+            self.assertEqual(fallback[field], cli[field], field)
+
+    def test_cli_fallback_cross_layer_binary_switch_clears_settings(self):
+        options = ("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir,
+                   "--allow-project-cli")
+        for prompt_input, prompt_args in [("stdin", {"stdinArg": "-"}), ("arg", {"promptPrefixArgs": ["-p"]})]:
+            with self.subTest(prompt_input=prompt_input):
+                self.config(self.user_config, self.role("worker", cli={"fallback": {
+                    "binary": "head", "fallbackBinaries": ["/old/head"], "args": ["-n", "1"],
+                    "nonGitArgs": ["--non-git"], "extraDirArgs": ["--dir"],
+                    "promptInput": prompt_input, **prompt_args, "env": {"OLD": "1"},
+                    "preflight": {"command": ["head", "--v"], "outputContains": "old"},
+                }}))
+                self.config(self.project_config, self.role("worker", cli={"fallback": {"binary": "wc"}}))
+                fallback = self.success(*options, "role", "worker")["cli"]["fallback"]
+                self.assertEqual(fallback["binary"], "wc")
+                self.assertEqual(fallback["promptInput"], prompt_input)
+                for field, value in {
+                    "fallbackBinaries": [], "args": [], "nonGitArgs": [], "extraDirArgs": [],
+                    "stdinArg": None, "promptPrefixArgs": [], "env": {}, "preflight": None,
+                }.items():
+                    self.assertEqual(fallback[field], value, field)
+
+    def test_cli_rework_cross_layer_preflight_replacement(self):
+        self.config(self.user_config, self.role("worker", cli={"rework": {"preflight": {
+            "command": ["login", "status"], "outputContains": "logged in", "timeoutSeconds": 20,
+            "env": {"OLD": "1"},
+        }}}))
+        self.config(self.project_config, self.role("worker", cli={"rework": {"preflight": {
+            "command": ["tool", "--version"],
+        }}}))
+        role = self.success("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir,
+                            "--allow-project-cli", "role", "worker")
+        self.assertEqual(role["cli"]["rework"]["preflight"], {
+            "command": ["tool", "--version"], "env": {}, "timeoutSeconds": 30,
+        })
+
+    def test_cli_rework_cross_layer_prompt_input_switch(self):
+        options = ("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir,
+                   "--allow-project-cli")
+        for old_input, new_input, field, value, cleared in [
+            ("stdin", "arg", "stdinArg", "-", None),
+            ("arg", "stdin", "promptPrefixArgs", ["-p"], []),
+        ]:
+            with self.subTest(old_input=old_input, new_input=new_input):
+                self.config(self.user_config, self.role("worker", cli={"rework": {
+                    "promptInput": old_input, field: value,
+                }}))
+                self.config(self.project_config, self.role("worker", cli={"rework": {"promptInput": new_input}}))
+                rework = self.success(*options, "role", "worker")["cli"]["rework"]
+                self.assertEqual(rework["promptInput"], new_input)
+                self.assertEqual(rework[field], cleared)
+
+                self.config(self.project_config, self.role("worker", cli={"rework": {
+                    "promptInput": new_input, field: value,
+                }}))
+                self.failure(self.invoke(*options, "validate"), 1, f"project: {self.project_config}:",
+                             f"$.roles.worker.cli.rework.{field}")
+
+    def test_cli_variant_null_clearing_and_cross_layer_merge(self):
+        default = json.loads((ROOT / "config" / "roles.default.json").read_text())
+        default["roles"]["worker"]["cli"].update(
+            env={"BASE": "yes"}, timeoutSeconds=90,
+            rework={"args": ["--default-rework"], "env": {"LOW": "yes"}, "timeoutSeconds": 10},
+            fallback={},
+        )
+        default_config = self.config(self.base / "default.json", default)
+        options = ("--default-config", default_config, "--user-config-dir", self.user_dir,
+                   "--project-config-dir", self.project_dir, "--allow-project-cli")
+        self.config(self.user_config, self.role("worker", cli={
+            "rework": {"env": {"USER": "yes"}, "timeoutSeconds": None},
+        }))
+        cli = self.success(*options, "role", "worker")["cli"]
+        self.assertEqual(cli["rework"]["args"], ["--default-rework"])
+        self.assertEqual(cli["rework"]["env"], {"BASE": "yes", "LOW": "yes", "USER": "yes"})
+        self.assertEqual(cli["rework"]["timeoutSeconds"], 90)
+        self.assertEqual(cli["fallback"], {
+            key: value for key, value in cli.items()
+            if key not in ("rework", "fallback") and not key.startswith("fallbackToNative")
+        })
+        self.config(self.project_config, self.role("worker", cli={
+            "rework": {"env": None, "nonGitArgs": None, "preflight": None, "outerLowQuotaFallback": None},
+            "fallback": None,
+        }))
+        cli = self.success(*options, "role", "worker")["cli"]
+        for field, value in {"env": {}, "nonGitArgs": [], "preflight": None, "outerLowQuotaFallback": None}.items():
+            self.assertEqual(cli["rework"][field], value, field)
+        self.assertIsNone(cli["fallback"])
+        self.config(self.project_config, self.role("worker", cli={"rework": None}))
+        self.assertIsNone(self.success(*options, "role", "worker")["cli"]["rework"])
+
+    def test_cli_variant_validation_and_origin_attribution(self):
+        for variant in ("rework", "fallback"):
+            path = f"$.roles.worker.cli.{variant}"
+            for override, suffix in [
+                ([], ""),
+                ({"rework": {}}, ".rework"), ({"fallback": None}, ".fallback"),
+                ({"fallbackToNativeOnPreflightFail": False}, ".fallbackToNativeOnPreflightFail"),
+                ({"fallbackToNativeOnTransientFailure": True}, ".fallbackToNativeOnTransientFailure"),
+                ({"unknown": True}, ".unknown"), ({"provider": None}, ".provider"),
+                ({"binary": 5}, ".binary"), ({"binary": None}, ".binary"), ({"args": [False]}, ".args[0]"),
+                ({"promptInput": "file"}, ".promptInput"),
+                ({"promptInput": "arg", "stdinArg": "-"}, ".stdinArg"),
+                ({"promptPrefixArgs": ["-p"]}, ".promptPrefixArgs"),
+                ({"env": {"BAD": None}}, ".env.BAD"), ({"env": {"": "bad"}}, ".env"),
+                ({"env": {"BAD": 4}}, ".env.BAD"), ({"timeoutSeconds": 0}, ".timeoutSeconds"),
+                ({"preflight": {"unknown": 1}}, ".preflight.unknown"),
+                ({"preflight": {"env": {}}}, ".preflight.command"),
+            ]:
+                with self.subTest(variant=variant, override=override):
+                    self.invalid_user(self.role("worker", cli={variant: override}), path + suffix)
+        self.config(self.user_config, self.role("worker", mode="native", cli={
+            "rework": {"provider": None}, "fallback": {"binary": None, "promptInput": None, "outerModel": None},
+        }))
+        options = ("--user-config-dir", self.user_dir)
+        cli = self.success(*options, "role", "worker")["cli"]
+        self.assertIsNone(cli["rework"]["provider"])
+        self.assertIsNone(cli["fallback"]["binary"])
+        self.config(self.project_config, self.role("worker", mode="cli"))
+        self.failure(self.invoke(*options, "--project-config-dir", self.project_dir, "validate"), 1,
+                     "project", self.project_config, "$.roles.worker.cli.rework.provider")
+
+    def test_review_cli_rework_and_fallback_provider_validation(self):
+        for variant in ("rework", "fallback"):
+            for provider, allow, distinct, minimum, ok in [
+                ("openai", False, True, 2, True), ("other", False, True, 2, True),
+                ("google", False, True, 2, False), ("google", True, True, 2, variant == "fallback"),
+                ("google", False, False, 2, True),
+                ("google", True, True, 3, False), ("other", True, True, 3, True),
+            ]:
+                with self.subTest(variant=variant, provider=provider, allow=allow, distinct=distinct, minimum=minimum):
+                    self.config(self.user_config, {
+                        **self.role("reviewer-codex", cli={variant: {"provider": provider}}),
+                        "reviews": {"council": {
+                            "members": ["reviewer-codex", "reviewer-gemini", "reviewer-claude"],
+                            "minDistinctProviders": minimum, "requireDistinctProviders": distinct,
+                            "allowSameProviderFallback": allow,
+                        }},
+                    })
+                    result = self.invoke("--user-config-dir", self.user_dir, "validate")
+                    if ok:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.failure(result, 1, self.user_config,
+                                     f"$.roles.reviewer-codex.cli.{variant}.provider", "council")
+
+    def test_review_cli_simultaneous_variant_switch_provider_validation(self):
+        members = ["reviewer-a", "reviewer-b"]
+        for variant in ("fallback", "rework"):
+            for minimum, allow in [(2, False), (2, True), (1, False), (1, True)]:
+                with self.subTest(variant=variant, minimum=minimum, allow=allow):
+                    self.config(self.user_config, {
+                        "roles": {
+                            member: dict(custom_cli_role(provider=provider, **{variant: {"provider": "c"}}),
+                                         readonly=True)
+                            for member, provider in zip(members, ("a", "b"))
+                        },
+                        "reviews": {"custom": {
+                            "members": members, "minDistinctProviders": minimum,
+                            "requireDistinctProviders": True, "allowSameProviderFallback": allow,
+                        }},
+                    })
+                    result = self.invoke("--user-config-dir", self.user_dir, "validate")
+                    if variant == "fallback" and allow and minimum == 1:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.failure(result, 1, f"user: {self.user_config}:",
+                                     f"$.roles.reviewer-a.cli.{variant}.provider", "custom")
+
+    def test_review_cli_partial_fallback_collapse_violates_minimum(self):
+        self.invalid_user({
+            "roles": {
+                member: dict(custom_cli_role(provider=base, fallback={"provider": fallback}), readonly=True)
+                for member, base, fallback in (
+                    ("reviewer-a", "a", "c"),
+                    ("reviewer-b", "b", "c"),
+                    ("reviewer-c", "c", "d"),
+                )
+            },
+            "reviews": {"custom": {
+                "members": ["reviewer-a", "reviewer-b", "reviewer-c"],
+                "minDistinctProviders": 2,
+                "requireDistinctProviders": True,
+                "allowSameProviderFallback": True,
+            }},
+        }, "$.roles.reviewer-a.cli.fallback.provider", "custom")
+
+    def test_review_cli_mixed_fallback_and_rework_provider_conflict(self):
+        self.invalid_user({
+            "roles": {
+                "reviewer-a": dict(custom_cli_role(provider="a", fallback={"provider": "c"}), readonly=True),
+                "reviewer-b": dict(custom_cli_role(provider="b", rework={"provider": "c"}), readonly=True),
+            },
+            "reviews": {"custom": {
+                # Validate rework first so the error points to the rework provider.
+                "members": ["reviewer-b", "reviewer-a"],
+                "minDistinctProviders": 2,
+                "requireDistinctProviders": True,
+                "allowSameProviderFallback": False,
+            }},
+        }, "$.roles.reviewer-b.cli.rework.provider", "custom")
+
+    def test_review_description_does_not_change_provider_conflict_origin(self):
+        default = json.loads((ROOT / "config" / "roles.default.json").read_text())
+        del default["reviews"]["council"]["allowSameProviderFallback"]
+        default_config = self.config(self.base / "default.json", default)
+        self.config(self.user_config, self.role("reviewer-codex", cli={"fallback": {"provider": "google"}}))
+        self.config(self.project_config, {"reviews": {"council": {"description": "Updated description"}}})
+        result = self.invoke("--default-config", default_config, "--user-config-dir", self.user_dir,
+                             "--project-config-dir", self.project_dir, "validate")
+        self.failure(result, 1, f"user: {self.user_config}:", "$.roles.reviewer-codex.cli.fallback.provider", "council")
+
     def test_review_member_and_provider_validation(self):
         for members in [[], ["reviewer-gemini", "reviewer-gemini"], ["worker", "reviewer-gemini"],
                         ["coordinator", "reviewer-gemini"], ["missing", "reviewer-gemini"]]:
@@ -686,6 +957,21 @@ class ResolveRolesTest(unittest.TestCase):
             env=dict(self.env, GBSTACK_ALLOW_PROJECT_CLI="1"),
         )
         self.assertEqual(pi_env["cli"]["args"], ["--proj"])
+
+        for variant in ("rework", "fallback"):
+            for override in (None, {"args": ["--proj"]}):
+                with self.subTest(variant=variant, override=override):
+                    self.invalid(self.role("worker", cli={variant: override}), "--allow-project-cli")
+                    options = ("--project-config-dir", self.project_dir)
+                    for cli in (
+                        self.success(*options, "--allow-project-cli", "role", "worker")["cli"],
+                        self.success(*options, "role", "worker",
+                                     env=dict(self.env, GBSTACK_ALLOW_PROJECT_CLI="1"))["cli"],
+                    ):
+                        if override is None:
+                            self.assertIsNone(cli[variant])
+                        else:
+                            self.assertEqual(cli[variant]["args"], ["--proj"])
 
 
 if __name__ == "__main__":

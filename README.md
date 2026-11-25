@@ -61,6 +61,8 @@ trusted for `cli` definitions. Project overrides may still change `mode`
 `reviews`, `slots`, or set `"cli": null`. To explicitly allow project-level
 `roles.*.cli`, pass `--allow-project-cli` to `resolve-roles.sh` /
 `preflight-cli.sh` / `run-cli.sh` or set `GBSTACK_ALLOW_PROJECT_CLI=1`.
+This opt-in also applies to project-level `roles.*.cli.rework` and
+`roles.*.cli.fallback` overrides.
 
 **Built-in slots:**
 - Role slots (`ROLE_SLOTS`): `coordinator`, `recon`, `plan`, `implement`, `monitor`
@@ -74,11 +76,11 @@ The default `roles.default.json` configures `worker` (Codex inline args,
 `outerModel: "gemini-3.8-flash-medium"`, with Native fallback) and
 `reviewer-codex` (Codex inline read-only args,
 `outerModel: "gemini-3.8-flash-medium"`, used in `council`) as built-in CLI role
-examples.
+examples. Both ship with `"rework": null` and `"fallback": null`.
 
 ### Resolver commands
 
-Role resolution requires Bash and Python 3.8+. From the plugin root, use
+Role resolution requires Bash and Python 3.9+. From the plugin root, use
 `--cwd` to select the project configuration:
 
 ```sh
@@ -115,8 +117,79 @@ A role with `"mode": "cli"` defines its behavior under `roles.<id>.cli`:
 | `preflight` | Object `{command, outputContains, env, timeoutSeconds}` for `preflight-cli.sh` |
 | `outerModel` | **Required** when `mode: "cli"` (the resolver does not auto-fill a default; `config/roles.default.json` uses `"gemini-3.8-flash-medium"`) |
 | `outerLowQuotaFallback` | Fallback outer driver model on quota exhaustion |
-| `fallbackToNativeOnPreflightFail` | Whether Coordinator may fall back to `native` if preflight fails |
-| `fallbackToNativeOnTransientFailure` | Whether Coordinator may fall back to `native` on zero-diff transient CLI failure |
+| `fallbackToNativeOnPreflightFail` | Whether Coordinator may fall back to `native` if preflight fails and no CLI fallback is usable |
+| `fallbackToNativeOnTransientFailure` | Whether Coordinator may fall back to `native` on zero-diff transient failure if no CLI fallback is usable |
+| `rework` | Optional object for `CLI_PROFILE: rework`. Inherits same-binary settings or isolates cross-binary settings. No nested `rework`/`fallback` or `fallbackToNativeOn*` keys. |
+| `fallback` | Optional object for `CLI_PROFILE: fallback`. Inherits same-binary settings or isolates cross-binary settings. No nested `rework`/`fallback` or `fallbackToNativeOn*` keys. |
+
+### Profile inheritance
+
+`CLI_PROFILE: default` uses the base `cli`. A missing or `null` `cli.rework`
+also uses the base CLI when rework is requested. A missing or `null`
+`cli.fallback` means there is no CLI-level fallback.
+
+`rework` and `fallback` accept only `provider`, `binary`, `fallbackBinaries`,
+`args`, `nonGitArgs`, `extraDirArgs`, `promptInput`, `stdinArg`,
+`promptPrefixArgs`, `env`, `timeoutSeconds`, `preflight`, `outerModel`, and
+`outerLowQuotaFallback`. `fallbackToNativeOnPreflightFail` and
+`fallbackToNativeOnTransientFailure` belong on the base `cli` only.
+
+- **Same binary** (omitted `binary` or the same value as the base): omitted
+  fields inherit from the base. An explicit list replaces the entire list
+  (`args`, `fallbackBinaries`, `nonGitArgs`, `extraDirArgs`, `promptPrefixArgs`);
+  `null` clears it to `[]`. An `env` object merges into the base environment,
+  with overrides winning; `env: null` clears the configured map to `{}`.
+  A `preflight` object replaces the entire check; `preflight: null` clears it.
+- **Different binary:** start with empty `fallbackBinaries`, `args`,
+  `nonGitArgs`, `extraDirArgs`, `promptPrefixArgs`, and `env`, and no
+  `stdinArg` or `preflight`. Only `provider`, `promptInput`, `timeoutSeconds`,
+  `outerModel`, and `outerLowQuotaFallback` inherit. Set `provider` explicitly
+  if the new command uses a different model provider.
+- In either case, `stdinArg: null` and `outerLowQuotaFallback: null` clear
+  those fields; `timeoutSeconds: null` inherits the base timeout. When
+  `promptInput` changes to `arg`, an omitted `stdinArg` is cleared. When it
+  changes to `stdin`, omitted `promptPrefixArgs` are cleared.
+
+### Coordinator fallback and rework
+
+The Coordinator owns every retry and profile change. The runner and outer
+worker/reviewer do not retry or switch profiles on their own.
+
+1. **Outer model low quota:** switch only the outer model in place with
+   `swarm{action:"model"}`, using the active profile's `outerLowQuotaFallback`.
+   The inner profile and provider stay the same.
+2. **CLI preflight fails:** report the failure. If `cli.fallback` is configured,
+   is not already active, and the user did not lock the primary CLI tool/model,
+   preflight it with `--role <id> --profile fallback`. If it passes, use
+   `CLI_PROFILE: fallback` and the fallback profile's `outerModel`. If no CLI
+   fallback is usable, switch to Native only if `fallbackToNativeOnPreflightFail`
+   allows it, a `native` configuration exists, and the user did not lock CLI
+   execution mode. Otherwise, stop and report.
+3. **Transient inner CLI failure:** verify that the cause is transient (such as
+   quota, rate limiting, expired authentication, or temporary service
+   unavailability) and not an environment blocker. Verify zero diff against
+   the baseline and an empty `changedFiles` in `GBSTACK_CLI_RESULT_JSON`.
+   If either check shows changes, preserve the workspace and report without
+   falling back. If `cli.fallback` is configured, is not already active, and
+   the user did not lock the primary CLI tool/model, preflight it first and
+   switch to it and its `outerModel` if it passes. If no CLI fallback is usable,
+   switch to Native only if `fallbackToNativeOnTransientFailure` allows it, a
+   `native` configuration exists, and the user did not lock CLI execution mode.
+
+The primary CLI tool/model lock blocks `cli.fallback`; the CLI execution mode
+lock blocks Native fallback. Review fallback must also preserve the configured
+provider coverage:
+when `requireDistinctProviders: true`, `resolve_review` checks distinct
+providers for `cli.rework.provider` and `cli.fallback.provider` as well as the
+base providers. Use the effective `provider` in the result summary to verify
+actual coverage and honor the review's fallback constraints.
+
+For rework, the Coordinator sets `CLI_PROFILE: rework`, switches the outer
+model in place if the effective `outerModel` differs, and preflights `rework`
+if configured and `(ROLE_ID, rework)` has not already passed in the session.
+With no configured rework profile, the effective profile is
+`default`. If the task already switched to `fallback`, keep using it for
+rework.
 
 ## Preflight and runner scripts
 
@@ -126,13 +199,25 @@ Run session-level read-only preflight checks when resolved roles or reviews have
 `requiresCliPreflight: true` (inspect active CLI roles via `cliRoles`):
 
 ```sh
-scripts/preflight-cli.sh --cwd /path/to/repo --role worker
+scripts/preflight-cli.sh --cwd /path/to/repo --role worker --profile rework
 scripts/preflight-cli.sh --cwd /path/to/repo --review council
-scripts/preflight-cli.sh --cwd /path/to/repo --all
+scripts/preflight-cli.sh --cwd /path/to/repo --all --profile all
 ```
 
-Exit codes: `0` passed, `1` preflight or config failure, `2` invalid arguments,
-`3` missing or disabled role/review, `127` executable not found.
+`--profile {default,rework,fallback,all}` selects checks for the targeted CLI
+roles. `default` (the default) checks the base CLI; `rework` checks the rework
+profile or reuses the base if `cli.rework` is absent or `null`. With `fallback`,
+explicit `--role <ROLE_ID>` targeting exits `2` with an error if a targeted CLI
+role has no `cli.fallback` configured. Batch `--review <REVIEW_ID>` and `--all`
+preflight only the targeted CLI roles that configure `cli.fallback`, skipping
+unconfigured roles. If none configure it, the script prints a skip notice and
+exits `0`. The `all` profile checks the base plus configured variants, skipping
+absent or `null` variants. Cache successful checks per `(ROLE_ID, profile)`
+for the session.
+
+Exit codes: `0` passed or skipped, `1` preflight or config failure, `2` invalid
+arguments or fallback not configured for an explicit `--role` target, `3`
+missing or disabled role/review, `127` executable not found.
 
 ### `scripts/run-cli.sh`
 
@@ -144,10 +229,16 @@ stdin:
 scripts/run-cli.sh \
   --role '<ROLE_ID>' \
   --cwd '<WORKDIR>' \
+  [--profile {default,rework,fallback}] \
   [--add-dir '<DIR>' ...] \
   [--timeout <SEC>] \
   [--baseline-json '<JSON>']
 ```
+
+`--profile {default,rework,fallback}` defaults to `default`. `rework` uses
+base settings if `cli.rework` is absent or `null`; requesting `fallback`
+without configured `cli.fallback` exits `2`. `run-cli.sh` never automatically
+retries or falls back.
 
 `run-cli.sh` resolves the binary, verifies the pre-write baseline (when
 `--baseline-json` is provided), injects Git/non-Git and `--add-dir` flags,
@@ -158,8 +249,12 @@ tracked in `changedFiles`):
 
 ```text
 --- GBSTACK_CLI_RESULT_JSON ---
-{"role":"...","binary":"...","exitCode":0,"timedOut":false,"durationMs":1234,"emptyOutput":false,"readonlyViolation":false,"workdir":"...","changedFiles":[],"outOfScopeFiles":[]}
+{"role":"worker","binary":"codex","profile":"rework","effectiveProfile":"default","provider":"openai","exitCode":0,"timedOut":false,"durationMs":1234,"emptyOutput":false,"readonlyViolation":false,"workdir":"...","changedFiles":[],"outOfScopeFiles":[]}
 ```
+
+`profile` records what was requested; `effectiveProfile` records what ran
+(`default` in this example, because `cli.rework` is `null`). `provider` is
+from the effective profile. These are read-only verification fields.
 
 **`--baseline-json` contract:** Only the following four keys are accepted; any
 unknown key is rejected immediately with exit code `2` before launching the
@@ -173,7 +268,7 @@ inner CLI:
 Exit codes:
 - `0`: Success
 - `1`: CLI non-zero exit or configuration error
-- `2`: Invalid arguments or pre-write baseline mismatch (including unknown `--baseline-json` keys)
+- `2`: Invalid arguments, requested fallback not configured, or pre-write baseline mismatch (including unknown `--baseline-json` keys)
 - `3`: Role missing or disabled
 - `4`: `readonly` role modified the workspace (`readonlyViolation`)
 - `5`: `readonly` role produced empty output (`emptyOutput`; must mark `未审完:`)
@@ -194,6 +289,10 @@ project-level `roles.*.cli` definitions require `--allow-project-cli` or
 > uses `cli.provider` to count distinct providers in heterogeneous reviews.
 
 ### Codex (`codex exec`)
+
+Rework raises Codex's reasoning effort; the CLI fallback uses Pi with an
+Anthropic model. Codex-specific arguments, paths, and preflight do not carry
+over to Pi.
 
 ```json
 {
@@ -239,6 +338,29 @@ project-level `roles.*.cli` definitions require `--allow-project-cli` or
           "env": {},
           "timeoutSeconds": 10
         },
+        "rework": {
+          "args": [
+            "exec",
+            "--ephemeral",
+            "--color", "never",
+            "-s", "workspace-write",
+            "-c", "approval_policy=\"never\"",
+            "-c", "model=\"gpt-6.2-sol\"",
+            "-c", "model_reasoning_effort=\"xhigh\"",
+            "-C", "{workdir}"
+          ]
+        },
+        "fallback": {
+          "provider": "anthropic",
+          "binary": "pi",
+          "args": ["-p", "--no-session", "--model", "anthropic/claude-sonnet-4-5"],
+          "promptInput": "arg",
+          "promptPrefixArgs": ["--"],
+          "preflight": {
+            "command": ["{binary}", "--version"],
+            "timeoutSeconds": 5
+          }
+        },
         "outerModel": "gemini-3.8-flash-medium",
         "outerLowQuotaFallback": "claude-sonnet-5-5-high",
         "fallbackToNativeOnPreflightFail": true,
@@ -250,6 +372,10 @@ project-level `roles.*.cli` definitions require `--allow-project-cli` or
 ```
 
 ### Pi (`pi -p`)
+
+The worker uses a different model for rework and a same-binary fallback to
+OpenAI. Both profiles replace the whole `args` list and inherit Pi's prompt
+handling and preflight.
 
 ```json
 {
@@ -288,7 +414,14 @@ project-level `roles.*.cli` definitions require `--allow-project-cli` or
         "outerModel": "gemini-3.8-flash-medium",
         "outerLowQuotaFallback": "claude-sonnet-5-5-high",
         "fallbackToNativeOnPreflightFail": true,
-        "fallbackToNativeOnTransientFailure": true
+        "fallbackToNativeOnTransientFailure": true,
+        "rework": {
+          "args": ["-p", "--no-session", "--model", "anthropic/claude-opus-4-5"]
+        },
+        "fallback": {
+          "provider": "openai",
+          "args": ["-p", "--no-session", "--model", "openai/gpt-5.2"]
+        }
       }
     },
     "reviewer-pi": {

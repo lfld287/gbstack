@@ -1,5 +1,7 @@
 """Resolve GBStack roles, review groups, and CLI configurations from local config."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -15,6 +17,16 @@ ROLE_SLOTS = ("coordinator", "recon", "plan", "implement", "monitor")
 REVIEW_SLOTS = ("review", "interrogate", "council")
 ROLE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,23}")
 NATIVE_FALLBACK_FLAGS = ("fallbackToNativeOnPreflightFail", "fallbackToNativeOnTransientFailure")
+CLI_VARIANTS = ("rework", "fallback")
+CLI_BINARY_BOUND_FIELDS = (
+    "fallbackBinaries", "args", "nonGitArgs", "extraDirArgs", "stdinArg", "promptPrefixArgs", "env", "preflight",
+)
+CLI_VARIANT_FIELDS = (
+    "provider", "binary", "fallbackBinaries", "args", "nonGitArgs", "extraDirArgs",
+    "promptInput", "stdinArg", "promptPrefixArgs", "env", "timeoutSeconds", "preflight",
+    "outerModel", "outerLowQuotaFallback",
+)
+CLI_PREFLIGHT_FIELDS = ("command", "outputContains", "env", "timeoutSeconds")
 FIELDS = {
     (): ("schemaVersion", "roles", "reviews", "slots"),
     ("slots",): ROLE_SLOTS + REVIEW_SLOTS,
@@ -23,12 +35,10 @@ FIELDS = {
         "mode", "native", "cli",
     ),
     ("roles", "*", "native"): ("provider", "model", "reworkModel", "lowQuotaFallback", "lowQuotaFallbackProvider"),
-    ("roles", "*", "cli"): (
-        "provider", "binary", "fallbackBinaries", "args", "nonGitArgs", "extraDirArgs",
-        "promptInput", "stdinArg", "promptPrefixArgs", "env", "timeoutSeconds", "preflight",
-        "outerModel", "outerLowQuotaFallback",
-    ) + NATIVE_FALLBACK_FLAGS,
-    ("roles", "*", "cli", "preflight"): ("command", "outputContains", "env", "timeoutSeconds"),
+    ("roles", "*", "cli"): CLI_VARIANT_FIELDS + NATIVE_FALLBACK_FLAGS + CLI_VARIANTS,
+    ("roles", "*", "cli", "preflight"): CLI_PREFLIGHT_FIELDS,
+    **{("roles", "*", "cli", variant): CLI_VARIANT_FIELDS for variant in CLI_VARIANTS},
+    **{("roles", "*", "cli", variant, "preflight"): CLI_PREFLIGHT_FIELDS for variant in CLI_VARIANTS},
     ("reviews", "*"): (
         "description", "members", "requireDistinctProviders", "minDistinctProviders",
         "allowSameProviderFallback", "onMissingProvider", "onIncomplete", "maxRounds",
@@ -153,6 +163,19 @@ def config_locations(args):
     return config_path("default", default), directories
 
 
+def select_cli_profile(cli_cfg, profile="default") -> tuple[dict | None, str | None]:
+    """Return the selected CLI configuration and its effective profile name."""
+    if profile == "default":
+        return cli_cfg, "default"
+    if profile in CLI_VARIANTS:
+        variant = cli_cfg.get(profile)
+        if variant is not None:
+            return variant, profile
+        if profile == "rework":
+            return cli_cfg, "default"
+    return None, None
+
+
 class Resolver:
     def __init__(self, args):
         self.allow_project_cli = bool(
@@ -193,6 +216,18 @@ class Resolver:
         if len(path) > 1 and path[0] in ("roles", "reviews"):
             shape = (path[0], "*", *path[2:])
         allowed = FIELDS.get(shape)
+        merging_cli = shape == ("roles", "*", "cli")
+        merging_variant = len(shape) == 4 and shape[:3] == ("roles", "*", "cli") and shape[3] in CLI_VARIANTS
+        if merging_cli:
+            # Use the previous layer's inherited values regardless of the order of keys in this update.
+            base_binary = base.get("binary")
+            base_prompt_input = base.get("promptInput")
+
+        def _clean_origins(target_path):
+            for origin_path in list(self.origins):
+                if origin_path[:len(target_path)] == target_path:
+                    del self.origins[origin_path]
+
         for key, new in update.items():
             field = (*path, key)
             if path == ("slots",) and key == "codexReview":
@@ -227,15 +262,33 @@ class Resolver:
             old = base.get(key)
             if old is not None and new is not None and type(old) is not type(new):
                 raise ConfigError(source, field, f"type conflict ({type(old).__name__} vs. {type(new).__name__})")
+            if isinstance(old, dict):
+                if not isinstance(new, dict):
+                    _clean_origins(field)
+                elif merging_cli and key in CLI_VARIANTS:
+                    prev_binary = old.get("binary") if old.get("binary") is not None else base_binary
+                    new_binary = new.get("binary")
+                    if new_binary is not None and prev_binary is not None and new_binary != prev_binary:
+                        for name in CLI_BINARY_BOUND_FIELDS:
+                            if name in old:
+                                del old[name]
+                                _clean_origins((*field, name))
+
+                    prev_input = old.get("promptInput") if old.get("promptInput") is not None else base_prompt_input
+                    new_input = new.get("promptInput")
+                    if new_input in ("stdin", "arg") and new_input != prev_input:
+                        incompatible = "stdinArg" if new_input == "arg" else "promptPrefixArgs"
+                        if incompatible in old and incompatible not in new:
+                            del old[incompatible]
+                            _clean_origins((*field, incompatible))
+                elif merging_variant and key == "preflight":
+                    old = {}
+                    _clean_origins(field)
             self.origins[field] = source
             if isinstance(new, dict):
                 base[key] = {} if old is None else old
                 self.merge(base[key], new, source, field)
             else:
-                if isinstance(old, dict):
-                    for descendant in list(self.origins):
-                        if len(descendant) > len(field) and descendant[:len(field)] == field:
-                            del self.origins[descendant]
                 base[key] = new
 
     def origin(self, path):
@@ -367,9 +420,49 @@ class Resolver:
 
     def resolve_cli(self, role_id, cli_cfg, mode, native):
         path = ("roles", role_id, "cli")
-        mode_field = ("roles", role_id, "mode")
+        normalized = self._normalize_cli_fields(cli_cfg, path, mode)
+        for flag in NATIVE_FALLBACK_FLAGS:
+            flag_value = self.expect(cli_cfg, path, flag, bool, optional=True)
+            if flag_value and native is None:
+                field = (*path, flag)
+                self.invalid(
+                    field,
+                    "requires a native configuration",
+                    self.latest_source(field, ("roles", role_id, "native")),
+                )
+            normalized[flag] = bool(flag_value)
+        for variant in CLI_VARIANTS:
+            override = self.expect(cli_cfg, path, variant, dict, optional=True)
+            normalized[variant] = self._normalize_cli_profile(normalized, override, (*path, variant), mode)
+        return normalized
+
+    def _normalize_cli_profile(self, base, override, path, mode):
+        if override is None:
+            return None
+        profile = {key: base[key] for key in CLI_VARIANT_FIELDS if key in base}
+        if override.get("binary", base.get("binary")) != base.get("binary"):
+            # Arguments, environment, and preflight belong to the executable, not the role.
+            profile.update(dict.fromkeys(CLI_BINARY_BOUND_FIELDS))
+        inherited_env = profile["env"] or {}
+        profile.update(override)
+        if "env" in override:
+            env = self.expect_env_dict(override, path, "env")
+            profile["env"] = {**inherited_env, **env} if override["env"] is not None else {}
+        if profile["timeoutSeconds"] is None:
+            profile["timeoutSeconds"] = base["timeoutSeconds"]
+        if "promptInput" in override and profile["promptInput"] != base.get("promptInput"):
+            if profile["promptInput"] == "arg" and "stdinArg" not in override:
+                profile["stdinArg"] = None
+            if profile["promptInput"] == "stdin" and "promptPrefixArgs" not in override:
+                profile["promptPrefixArgs"] = []
+        prompt_field = (*path, "promptInput") if "promptInput" in override else (*path[:-1], "promptInput")
+        return self._normalize_cli_fields(profile, path, mode, prompt_field)
+
+    def _normalize_cli_fields(self, cli_cfg, path, mode, prompt_field=None):
         optional = mode != "cli"
-        mode_origins = (mode_field,) if mode == "cli" else ()
+        mode_origins = ((*path[:2], "mode"),) if not optional else ()
+        if prompt_field is None:
+            prompt_field = (*path, "promptInput")
         self.expect(cli_cfg, path, "provider", str, optional=optional, extra_origins=mode_origins)
         self.expect(cli_cfg, path, "binary", str, optional=optional, extra_origins=mode_origins)
         fallback_binaries = self.expect_str_list(cli_cfg, path, "fallbackBinaries", nonempty_items=True)
@@ -386,14 +479,14 @@ class Resolver:
             self.invalid(
                 field,
                 "stdinArg cannot be set when promptInput is 'arg'",
-                self.latest_source(field, (*path, "promptInput")),
+                self.latest_source(field, prompt_field),
             )
         if prompt_prefix_args and prompt_input == "stdin":
             field = (*path, "promptPrefixArgs")
             self.invalid(
                 field,
                 "promptPrefixArgs cannot be non-empty when promptInput is 'stdin'",
-                self.latest_source(field, (*path, "promptInput")),
+                self.latest_source(field, prompt_field),
             )
         env = self.expect_env_dict(cli_cfg, path, "env")
         timeout_seconds = self.expect_positive_int(cli_cfg, path, "timeoutSeconds", default=600)
@@ -410,30 +503,11 @@ class Resolver:
             preflight = dict(preflight_raw, command=command, env=pf_env, timeoutSeconds=pf_timeout)
         self.expect(cli_cfg, path, "outerModel", str, optional=optional, extra_origins=mode_origins)
         self.expect(cli_cfg, path, "outerLowQuotaFallback", str, optional=True)
-        fallback_flags = {}
-        for flag in NATIVE_FALLBACK_FLAGS:
-            flag_value = self.expect(cli_cfg, path, flag, bool, optional=True)
-            if flag_value and native is None:
-                field = (*path, flag)
-                self.invalid(
-                    field,
-                    "requires a native configuration",
-                    self.latest_source(field, ("roles", role_id, "native")),
-                )
-            fallback_flags[flag] = bool(flag_value)
-        normalized = dict(cli_cfg)
-        normalized.update({
-            "fallbackBinaries": fallback_binaries,
-            "args": args,
-            "nonGitArgs": non_git_args,
-            "extraDirArgs": extra_dir_args,
-            "promptPrefixArgs": prompt_prefix_args,
-            "env": env,
-            "timeoutSeconds": timeout_seconds,
-            "preflight": preflight,
-            **fallback_flags,
-        })
-        return normalized
+        return dict(
+            cli_cfg, fallbackBinaries=fallback_binaries, args=args, nonGitArgs=non_git_args,
+            extraDirArgs=extra_dir_args, promptPrefixArgs=prompt_prefix_args, env=env,
+            timeoutSeconds=timeout_seconds, preflight=preflight,
+        )
 
     def resolve_review(self, review_id, review):
         path = ("reviews", review_id)
@@ -477,11 +551,15 @@ class Resolver:
             for name, role in member_roles.items()
             for origin_path in (("roles", name, "mode"), ("roles", name, role["mode"], "provider"))
         ]
+        review_fields = tuple(
+            field for key in ("members", "minDistinctProviders", "requireDistinctProviders")
+            if (field := (*path, key)) in self.origins
+        )
+        fallback_field = (*path, "allowSameProviderFallback")
+        fallback_fields = (fallback_field,) if fallback_field in self.origins else ()
         if distinct and len(unique_providers) < minimum:
             field = (*path, "minDistinctProviders")
-            source = self.latest_source(
-                field, (*path, "members"), (*path, "requireDistinctProviders"), *provider_fields,
-            )
+            source = self.latest_source(*review_fields, *provider_fields)
             self.invalid(field, f"only {len(unique_providers)} distinct providers are available", source)
         if distinct and allow_fallback is not True:
             for member, role in member_roles.items():
@@ -501,14 +579,67 @@ class Resolver:
                 if fallback in other_providers or len(other_providers | {fallback}) < minimum:
                     source = self.latest_source(
                         field, ("roles", member, "mode"), ("roles", member, "native", "lowQuotaFallback"),
-                        (*path, "members"), (*path, "minDistinctProviders"), (*path, "requireDistinctProviders"),
-                        (*path, "allowSameProviderFallback"), *provider_fields,
+                        *review_fields, *fallback_fields, *provider_fields,
                     )
                     self.invalid(
                         field,
                         f"fallback would reuse a provider or leave too few distinct providers in review {review_id!r}",
                         source,
                     )
+        if distinct:
+            member_options = {member: {provider} for member, provider in providers.items()}
+            for member, role in member_roles.items():
+                if role["mode"] == "cli":
+                    member_options[member].update(
+                        role["cli"][variant]["provider"]
+                        for variant in CLI_VARIANTS
+                        if role["cli"][variant] is not None
+                    )
+
+            for member, role in member_roles.items():
+                if role["mode"] != "cli":
+                    continue
+                for variant in CLI_VARIANTS:
+                    profile = role["cli"][variant]
+                    if profile is None:
+                        continue
+                    provider = profile["provider"]
+                    if provider == providers[member]:
+                        continue
+
+                    colliding_others = [
+                        name for name, options in member_options.items()
+                        if name != member and provider in options
+                    ]
+                    reuses = bool(colliding_others) and not (variant == "fallback" and allow_fallback is True)
+                    forced_other = {
+                        providers[name] for name, options in member_options.items()
+                        if name != member and provider not in options
+                    }
+                    if reuses or len(forced_other | {provider}) < minimum:
+                        field = ("roles", member, "cli", variant, "provider")
+                        conflict_fields = [field, *review_fields]
+                        if variant == "fallback":
+                            conflict_fields.extend(fallback_fields)
+                        for name in colliding_others or [name for name in member_roles if name != member]:
+                            other_role = member_roles[name]
+                            if (
+                                other_role["mode"] == "cli"
+                                and other_role["cli"][variant] is not None
+                                and other_role["cli"][variant]["provider"] == provider
+                            ):
+                                conflict_fields.append(("roles", name, "cli", variant, "provider"))
+                            else:
+                                conflict_fields.extend((
+                                    ("roles", name, "provider"),
+                                    ("roles", name, other_role["mode"], "provider"),
+                                ))
+                        self.invalid(
+                            field,
+                            f"roles.{member}.cli.{variant}.provider {provider!r} "
+                            f"violates review policy {review_id!r} distinct provider requirements",
+                            self.latest_source(*conflict_fields),
+                        )
         cli_roles = list(dict.fromkeys(
             member for member, role in member_roles.items() if role["mode"] == "cli"
         ))
@@ -558,6 +689,8 @@ class Resolver:
             "binary": cli_cfg["binary"],
             "readonly": role["readonly"],
             "hasPreflight": cli_cfg.get("preflight") is not None,
+            "hasRework": cli_cfg.get("rework") is not None,
+            "hasFallback": cli_cfg.get("fallback") is not None,
         }
 
     def cli_role_summaries(self):

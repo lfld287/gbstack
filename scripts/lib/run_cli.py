@@ -20,6 +20,7 @@ import resolve_roles  # noqa: E402
 
 RESULT_MARKER = "--- GBSTACK_CLI_RESULT_JSON ---"
 DEFAULT_MAX_OUTPUT_BYTES = 65536
+CLI_PROFILES = ("default", *resolve_roles.CLI_VARIANTS)
 
 
 class SignalReceived(BaseException):
@@ -181,6 +182,7 @@ def _run_process_group(cmd, *, cwd, env, stdin_mode, stdin_bytes, timeout, merge
 def parse_preflight_args(argv):
     parser = argparse.ArgumentParser(prog="preflight-cli.sh", allow_abbrev=False)
     add_resolver_arguments(parser, cwd_required=False)
+    parser.add_argument("--profile", choices=(*CLI_PROFILES, "all"), default="default")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--role", action="append", metavar="ROLE_ID")
     target.add_argument("--review", metavar="REVIEW_ID")
@@ -217,70 +219,94 @@ def run_preflight(argv):
             if role["mode"] != "cli":
                 print(f"Error: role {role_id!r} is in {role['mode']!r} mode, not 'cli'", file=sys.stderr)
                 return 1
+            if args.profile == "fallback":
+                selected, _ = resolve_roles.select_cli_profile(role["cli"], "fallback")
+                if selected is None:
+                    print(f"Error: role {role_id!r} does not configure cli.fallback", file=sys.stderr)
+                    return 2
             targets.append(role)
 
-    if not targets:
-        print("No active CLI roles to preflight; skipping.")
-        return 0
-
+    checked = False
     for role in targets:
-        role_id = role["id"]
         cli_cfg = role["cli"]
-        binary_path = resolve_binary(cli_cfg, role_id)
-        if binary_path is None:
-            return 127
-        preflight = cli_cfg.get("preflight")
-        if preflight is None:
-            print(f"Preflight OK: {role_id} ({binary_path}, no preflight command)")
-            continue
-        cmd = [
-            substitute_placeholders(part, binary=binary_path, workdir=str(workdir))
-            for part in preflight["command"]
-        ]
-        env = os.environ.copy()
-        env.update(cli_cfg.get("env", {}))
-        env.update(preflight.get("env", {}))
-        timeout = preflight.get("timeoutSeconds", 30)
-        outcome = _run_process_group(
-            cmd,
-            cwd=workdir,
-            env=env,
-            stdin_mode=subprocess.DEVNULL,
-            stdin_bytes=None,
-            timeout=timeout,
-            merge_stderr=True,
+        profiles = (
+            [name for name in CLI_PROFILES if name == "default" or cli_cfg.get(name) is not None]
+            if args.profile == "all" else [args.profile]
         )
-        if outcome["signal_exit"] is not None:
-            return outcome["signal_exit"]
-        if outcome["os_error"] is not None:
-            print(
-                f"Error: preflight command failed to start for role {role_id!r}: {outcome['os_error']}",
-                file=sys.stderr,
-            )
-            return 1
+        for profile in profiles:
+            selected, effective = resolve_roles.select_cli_profile(cli_cfg, profile)
+            if selected is None:
+                continue
+            checked = True
+            role_id = role["id"]
+            label = role_id if effective == "default" else f"{role_id} [{effective}]"
+            status = _preflight_profile(selected, label, workdir)
+            if status != 0:
+                return status
 
-        output = outcome["stdout_bytes"].decode("utf-8", errors="replace")
-        if outcome["timed_out"]:
-            print(
-                f"Error: preflight command timed out after {timeout}s for role {role_id!r}\n{output}".rstrip(),
-                file=sys.stderr,
-            )
-            return 1
-        if outcome["exit_code"] != 0:
-            print(
-                f"Error: preflight command exited {outcome['exit_code']} for role {role_id!r}:\n{output}".rstrip(),
-                file=sys.stderr,
-            )
-            return 1
-        expected = preflight.get("outputContains")
-        if expected is not None and expected not in output:
-            print(
-                f"Error: preflight output for role {role_id!r} did not contain {expected!r}:\n{output}".rstrip(),
-                file=sys.stderr,
-            )
-            return 1
-        print(f"Preflight OK: {role_id} ({binary_path})")
+    if not checked:
+        if args.profile == "fallback":
+            print("No active CLI roles configure cli.fallback; skipping.")
+        else:
+            print("No active CLI roles to preflight; skipping.")
+    return 0
 
+
+def _preflight_profile(cli_cfg, role_label, workdir):
+    binary_path = resolve_binary(cli_cfg, role_label)
+    if binary_path is None:
+        return 127
+    preflight = cli_cfg.get("preflight")
+    if preflight is None:
+        print(f"Preflight OK: {role_label} ({binary_path}, no preflight command)")
+        return 0
+    cmd = [
+        substitute_placeholders(part, binary=binary_path, workdir=str(workdir))
+        for part in preflight["command"]
+    ]
+    env = os.environ.copy()
+    env.update(cli_cfg.get("env", {}))
+    env.update(preflight.get("env", {}))
+    timeout = preflight.get("timeoutSeconds", 30)
+    outcome = _run_process_group(
+        cmd,
+        cwd=workdir,
+        env=env,
+        stdin_mode=subprocess.DEVNULL,
+        stdin_bytes=None,
+        timeout=timeout,
+        merge_stderr=True,
+    )
+    if outcome["signal_exit"] is not None:
+        return outcome["signal_exit"]
+    if outcome["os_error"] is not None:
+        print(
+            f"Error: preflight command failed to start for role {role_label!r}: {outcome['os_error']}",
+            file=sys.stderr,
+        )
+        return 1
+
+    output = outcome["stdout_bytes"].decode("utf-8", errors="replace")
+    if outcome["timed_out"]:
+        print(
+            f"Error: preflight command timed out after {timeout}s for role {role_label!r}\n{output}".rstrip(),
+            file=sys.stderr,
+        )
+        return 1
+    if outcome["exit_code"] != 0:
+        print(
+            f"Error: preflight command exited {outcome['exit_code']} for role {role_label!r}:\n{output}".rstrip(),
+            file=sys.stderr,
+        )
+        return 1
+    expected = preflight.get("outputContains")
+    if expected is not None and expected not in output:
+        print(
+            f"Error: preflight output for role {role_label!r} did not contain {expected!r}:\n{output}".rstrip(),
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Preflight OK: {role_label} ({binary_path})")
     return 0
 
 
@@ -288,6 +314,7 @@ def parse_run_args(argv):
     parser = argparse.ArgumentParser(prog="run-cli.sh", allow_abbrev=False)
     parser.add_argument("--role", required=True, metavar="ROLE_ID")
     add_resolver_arguments(parser, cwd_required=True)
+    parser.add_argument("--profile", choices=CLI_PROFILES, default="default")
     parser.add_argument("--add-dir", action="append", default=[], metavar="DIR")
     parser.add_argument("--timeout", type=int, metavar="SEC")
     parser.add_argument("--baseline-json", metavar="JSON")
@@ -570,12 +597,16 @@ def run_cli_command(argv):
         print(f"Error: role {args.role!r} is in {role['mode']!r} mode, not 'cli'", file=sys.stderr)
         return 1
 
+    cli_cfg, effective_profile = resolve_roles.select_cli_profile(role["cli"], args.profile)
+    if cli_cfg is None:
+        print(f"Error: role {args.role!r} does not configure cli.fallback", file=sys.stderr)
+        return 2
+
     prompt = sys.stdin.read()
     if not prompt.strip():
         print("Error: prompt on stdin must not be empty", file=sys.stderr)
         return 2
 
-    cli_cfg = role["cli"]
     binary_path = resolve_binary(cli_cfg, role["id"])
     if binary_path is None:
         return 127
@@ -682,6 +713,9 @@ def run_cli_command(argv):
         "workdir": str(workdir),
         "changedFiles": changed_files,
         "outOfScopeFiles": out_of_scope_files,
+        "profile": args.profile,
+        "effectiveProfile": effective_profile,
+        "provider": cli_cfg["provider"],
     }
     sys.stdout.write(f"{RESULT_MARKER}\n{json.dumps(result_payload, separators=(',', ':'))}\n")
 

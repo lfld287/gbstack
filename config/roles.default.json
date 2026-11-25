@@ -91,7 +91,9 @@
         "outerModel": "gemini-3.8-flash-medium",
         "outerLowQuotaFallback": "claude-sonnet-5-5-high",
         "fallbackToNativeOnPreflightFail": true,
-        "fallbackToNativeOnTransientFailure": true
+        "fallbackToNativeOnTransientFailure": true,
+        "rework": null,
+        "fallback": null
       }
     },
     "reviewer-gemini": {
@@ -166,7 +168,9 @@
         "outerModel": "gemini-3.8-flash-medium",
         "outerLowQuotaFallback": "claude-sonnet-5-5-high",
         "fallbackToNativeOnPreflightFail": false,
-        "fallbackToNativeOnTransientFailure": false
+        "fallbackToNativeOnTransientFailure": false,
+        "rework": null,
+        "fallback": null
       }
     },
     "monitor": {

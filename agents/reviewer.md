@@ -13,24 +13,26 @@ tools: [read_file, run_command, manage_task]
 
 ## CLI mode
 
-- Read `ROLE_ID`, `PLUGIN_ROOT`, `WORKDIR` (`pwd` in `share` / `branch`, or the brief's target directory), and optional `--timeout <SEC>` from the brief. The outer driver checks inputs read-only and relays findings and evidence faithfully, without substituting its own review.
+- Read `ROLE_ID`, `PLUGIN_ROOT`, `WORKDIR` (`pwd` in `share` / `branch`, or the brief's target directory), optional `CLI_PROFILE` (`default` | `rework` | `fallback`, default `default`), and optional `--timeout <SEC>` from the brief. Pass the requested profile to the runner. The outer driver checks inputs read-only and relays findings and evidence faithfully, without substituting its own review.
 - Send exact scope, files or diff baseline, read-only and Git rules, and output requirements via the stdin pipe below. Tell the inner CLI to verify failure paths and runtime evidence, weigh fix benefits against added complexity and maintenance cost, and omit overdefensive suggestions. Shell-quote the prompt to preserve its literal contents. Use the stdin pipe to avoid temporary files that Bash 3.2 and other shells can create for heredocs. No temp files or bypassing `run-cli.sh`.
 
 ```sh
 ROLE_ID='<ROLE_ID>'
 PLUGIN_ROOT='<PLUGIN_ROOT>'
+CLI_PROFILE='<CLI_PROFILE>' # default if omitted in the brief
 WORKDIR='<WORKDIR>'
 
 printf '%s\n' '<SELF_CONTAINED_REVIEW_PROMPT>' |
   "$PLUGIN_ROOT/scripts/run-cli.sh" \
     --role "$ROLE_ID" \
     --cwd "$WORKDIR" \
+    [--profile "$CLI_PROFILE"] \
     [--timeout <SEC>]
 ```
 
 - Use `WaitMsBeforeAsync: 10000`. If backgrounded, end the turn and await completion notification without polling `manage_task` or calling `swarm_wait`.
-- `run-cli.sh` checks `readonly` tampering and empty output automatically, printing `--- GBSTACK_CLI_RESULT_JSON ---` followed by a single-line JSON summary.
-- On exit code `4` (`readonlyViolation`), `5` (`emptyOutput`), `124` (timeout), `128+N` (external signal), or any other non-zero exit (`1`, `2`, `3`, `127`, etc.), MUST mark `未审完:` and report verbatim `GBSTACK_CLI_RESULT_JSON` (if emitted), exit code, and output.
+- `run-cli.sh` checks `readonly` tampering and empty output automatically, printing `--- GBSTACK_CLI_RESULT_JSON ---` followed by a single-line JSON summary (`role`, `binary`, `profile`, `effectiveProfile`, `provider`, `exitCode`, `timedOut`, `durationMs`, `emptyOutput`, `readonlyViolation`, `workdir`, `changedFiles`, `outOfScopeFiles`).
+- On failure (any non-zero exit), timeout, empty output, or a read-only violation, MUST mark `未审完:` and report the exit code, output, and verbatim `GBSTACK_CLI_RESULT_JSON` (if emitted), including `profile`, `effectiveProfile`, and `provider`. Never retry or silently switch profiles, including to `--profile fallback`; only the Coordinator can authorize a retry or profile change.
 
 ## Output
 
