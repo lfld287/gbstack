@@ -18,4 +18,4 @@ while [[ -L "$source_path" ]]; do
     esac
 done
 SCRIPT_DIR=$(CDPATH= cd -P -- "${source_path%/*}" && pwd -P) || exit 1
-exec python3 "$SCRIPT_DIR/lib/resolve_roles.py" "$@"
+exec python3 -B "$SCRIPT_DIR/lib/resolve_roles.py" "$@"

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "roles": {
     "coordinator": {
       "description": "Top-level Swarm coordinator for task breakdown, dispatch, verification, and Git commits.",
@@ -12,7 +12,7 @@
         "model": "gemini-4-hydrogen-high",
         "lowQuotaFallback": null
       },
-      "codex": null
+      "cli": null
     },
     "scout": {
       "description": "Read-only local reconnaissance, targeted diagnosis, external research, and pre-write baseline collection.",
@@ -25,7 +25,7 @@
         "model": "gemini-4-hydrogen-medium",
         "lowQuotaFallback": null
       },
-      "codex": null
+      "cli": null
     },
     "plan": {
       "description": "Read-only software architect for exploration and implementation planning.",
@@ -38,27 +38,57 @@
         "model": "gemini-4-neon-xhigh",
         "lowQuotaFallback": "claude-opus-5-5-high"
       },
-      "codex": null
+      "cli": null
     },
     "worker": {
-      "description": "Controlled implementation agent supporting Codex and Native execution modes.",
+      "description": "Controlled implementation agent supporting dynamic CLI and Native execution modes.",
       "prompt": "worker.md",
       "readonly": false,
       "workspace": "inherit",
       "concurrentWorkspace": "share",
-      "mode": "codex",
+      "mode": "cli",
       "native": {
         "provider": "google",
         "model": "gemini-4-hydrogen-high",
         "reworkModel": "gemini-4-neon-high",
         "lowQuotaFallback": "claude-sonnet-5-5-high"
       },
-      "codex": {
+      "cli": {
         "provider": "openai",
-        "profile": "worker-codex",
-        "extraProfiles": ["worker-codex-xhigh"],
-        "sandbox": "workspace-write",
-        "outerModel": "gemini-4-hydrogen-medium",
+        "binary": "codex",
+        "fallbackBinaries": ["~/.local/bin/codex"],
+        "args": [
+          "exec",
+          "--ephemeral",
+          "--color",
+          "never",
+          "-m",
+          "gpt-6.2-sol",
+          "-c",
+          "model_reasoning_effort=\"high\"",
+          "-c",
+          "approval_policy=\"never\"",
+          "-s",
+          "workspace-write",
+          "-C",
+          "{workdir}"
+        ],
+        "nonGitArgs": ["--skip-git-repo-check"],
+        "extraDirArgs": ["--add-dir", "{dir}"],
+        "promptInput": "stdin",
+        "stdinArg": "-",
+        "timeoutSeconds": 600,
+        "preflight": {
+          "command": [
+            "sh",
+            "-c",
+            "h=\"${CODEX_HOME:-$HOME/.codex}\"; g=$(cd -- \"$h\" 2>/dev/null && pwd -P || printf '%s' \"$h\"); CODEX_HOME=\"$h\" TMPDIR=\"$g\" \"$1\" login status",
+            "_",
+            "{binary}"
+          ],
+          "outputContains": "Logged in"
+        },
+        "outerModel": "gemini-3.8-flash-medium",
         "outerLowQuotaFallback": "claude-sonnet-5-5-high",
         "fallbackToNativeOnPreflightFail": true,
         "fallbackToNativeOnTransientFailure": true
@@ -75,7 +105,7 @@
         "model": "gemini-4-neon-xhigh",
         "lowQuotaFallback": null
       },
-      "codex": null
+      "cli": null
     },
     "reviewer-claude": {
       "description": "Read-only code and design reviewer running on Claude Native.",
@@ -88,21 +118,52 @@
         "model": "claude-opus-5-5-high",
         "lowQuotaFallback": null
       },
-      "codex": null
+      "cli": null
     },
     "reviewer-codex": {
-      "description": "Read-only code and design reviewer running via Codex.",
+      "description": "Read-only code and design reviewer backed by Codex CLI.",
       "prompt": "reviewer.md",
       "readonly": true,
       "workspace": "inherit",
-      "mode": "codex",
+      "mode": "cli",
       "native": null,
-      "codex": {
+      "cli": {
         "provider": "openai",
-        "profile": "reviewer-codex",
-        "extraProfiles": [],
-        "sandbox": "read-only",
-        "outerModel": "gemini-4-hydrogen-medium",
+        "binary": "codex",
+        "fallbackBinaries": ["~/.local/bin/codex"],
+        "args": [
+          "exec",
+          "--ephemeral",
+          "--color",
+          "never",
+          "-m",
+          "gpt-6.2-astra",
+          "-c",
+          "model_reasoning_effort=\"xhigh\"",
+          "-c",
+          "approval_policy=\"never\"",
+          "-c",
+          "mcp_servers.node_repl.enabled=false",
+          "-s",
+          "read-only",
+          "-C",
+          "{workdir}"
+        ],
+        "nonGitArgs": ["--skip-git-repo-check"],
+        "promptInput": "stdin",
+        "stdinArg": "-",
+        "timeoutSeconds": 600,
+        "preflight": {
+          "command": [
+            "sh",
+            "-c",
+            "h=\"${CODEX_HOME:-$HOME/.codex}\"; g=$(cd -- \"$h\" 2>/dev/null && pwd -P || printf '%s' \"$h\"); CODEX_HOME=\"$h\" TMPDIR=\"$g\" \"$1\" login status",
+            "_",
+            "{binary}"
+          ],
+          "outputContains": "Logged in"
+        },
+        "outerModel": "gemini-3.8-flash-medium",
         "outerLowQuotaFallback": "claude-sonnet-5-5-high",
         "fallbackToNativeOnPreflightFail": false,
         "fallbackToNativeOnTransientFailure": false
@@ -120,22 +181,13 @@
         "model": "gemini-3.8-flash-low",
         "lowQuotaFallback": null
       },
-      "codex": null
+      "cli": null
     }
   },
   "reviews": {
     "default": {
       "description": "Dual Native heterogeneous cross-review for Review Gate, pr-review, and interrogate.",
       "members": ["reviewer-gemini", "reviewer-claude"],
-      "requireDistinctProviders": true,
-      "minDistinctProviders": 2,
-      "allowSameProviderFallback": false,
-      "onMissingProvider": "mark-incomplete",
-      "onIncomplete": "mark-incomplete"
-    },
-    "codex": {
-      "description": "Non-council user-requested Codex review paired with one Native reviewer.",
-      "members": ["reviewer-codex", "reviewer-gemini"],
       "requireDistinctProviders": true,
       "minDistinctProviders": 2,
       "allowSameProviderFallback": false,
@@ -161,7 +213,6 @@
     "monitor": "monitor",
     "review": "default",
     "interrogate": "default",
-    "codexReview": "codex",
     "council": "council"
   }
 }

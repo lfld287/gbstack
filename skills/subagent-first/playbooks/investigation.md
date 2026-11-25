@@ -2,7 +2,7 @@
 
 **定位**　做法 A — Coordinator 只读指挥剧本。
 
-**硬门禁**　纯调研只读，禁止写入。免写前基线，未派发 Codex 角色时免 Codex 预检。跳过 `worker`。按 Review Gate 判定是否派发 `reviewer`，用户明确要求独立审查时须派发。并行检查点固定为单行 `n/a: read-only investigation`。
+**硬门禁**　纯调研只读，禁止写入。免写前基线，未派发 CLI 角色时免外部 CLI 预检。跳过 `worker`。按 Review Gate 判定是否派发 `reviewer`，用户明确要求独立审查时须派发。并行检查点固定为单行 `n/a: read-only investigation`。
 
 1. **拆维度。** 按独立问题派 1 至 N 个 `scout`，无依赖的同轮并行。结构或流程挂 [`how`](../../how/SKILL.md)，历史或动机挂 [`why`](../../why/SKILL.md)，系统讲解挂 [`teach`](../../teach/SKILL.md)。长会话或中断后接续时，先用 [`ketchup`](../../ketchup/SKILL.md) 恢复上下文。
 2. **收口。** 按六节组织结论与证据：概览 / 关键概念 / 运行方式 / 代码位置 / 易踩坑 / 权衡表。

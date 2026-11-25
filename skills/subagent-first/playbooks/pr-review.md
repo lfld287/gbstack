@@ -2,7 +2,7 @@
 
 **定位**　面向 PR / diff，先讲清改了什么、如何工作（`how`）与为何如此设计（`why`），再独立审查潜在 bug、回归、影响面与可落地的改进点。
 
-**硬门禁**　默认只读，免写前基线，跳过 `worker`。`reviewer` 和 `scout` 均不得写文件，包括临时文件、脚本和夹具。复现或验证确需写入时，本轮列出缺失证据，待用户授权后由 Coordinator 采集写前基线，再派 `worker`。必派独立 `reviewer`。Review Gate 用 `slots.review` 交叉审查，用户显式要求 Codex 审查时用 `slots.codexReview`，显式触发 [`council`](../../council/SKILL.md) 时用 `slots.council`。解析结果的 `requiresCodexPreflight` 为真时，按 [`subagent-first`](../SKILL.md) 第二节预检所需的 Codex profile。讲解与发现须附 `path:line` 或可核验的 PR/commit 证据，跳过纯风格 nit。
+**硬门禁**　默认只读，免写前基线，跳过 `worker`。`reviewer` 和 `scout` 均不得写文件，包括临时文件、脚本和夹具。复现或验证确需写入时，本轮列出缺失证据，待用户授权后由 Coordinator 采集写前基线，再派 `worker`。必派独立 `reviewer`。Review Gate 用 `slots.review` 交叉审查，用户显式指定某种外部 CLI 审查时用 `resolve-roles.sh role <id>` 或自定义 `review <id>` 解析派发，显式触发 [`council`](../../council/SKILL.md) 时用 `slots.council`。解析结果的 `requiresCliPreflight` 为真时，按 [`subagent-first`](../SKILL.md) 第二节运行 `preflight-cli.sh` 预检所需的 CLI 角色（`cliRoles`）。讲解与发现须附 `path:line` 或可核验的 PR/commit 证据，跳过纯风格 nit。
 
 1. **锁定审查范围。** 派 `scout` 按用户指定的输入只读取证，按模块或关注点整理改动，必要时补查调用方与测试。
    - 分支或 commit 对比：读取 `GIT_OPTIONAL_LOCKS=0 git diff <base>...<head> --no-ext-diff --no-textconv` 的完整输出。

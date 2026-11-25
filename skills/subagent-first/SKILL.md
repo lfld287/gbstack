@@ -1,7 +1,7 @@
 ---
 name: subagent-first
 description: >-
-  顶层 Coordinator 的 Swarm 协调手册，涵盖生效角色配置、Codex 预检、写前基线、审查验收与故障恢复。
+  顶层 Coordinator 的 Swarm 协调手册，涵盖生效角色配置、外部 CLI 预检、写前基线、审查验收与故障恢复。
 ---
 
 # Swarm 协调规程
@@ -12,15 +12,15 @@ description: >-
 - Swarm 成员（含 `monitor`、`narrator`）、`invoke_subagent` 子代理、`run_workflow` 的 `agent()` 步骤和 Orca worker 直接执行自身任务，严禁二次派活（含 `swarm{action:"add"}`）。
 - 汇报先说现状和结论，保留阻塞与待决项。已定范围内的细节自主处理，扩大目标或影响面、改变公共接口或技术取舍交用户拍板。
 
-## 二、生效角色配置与 Codex 会话级预检
+## 二、生效角色配置与外部 CLI 会话级预检
 
-从已加载的 `subagent-first/SKILL.md` 所在目录解析 `../..` 得到绝对路径 `<PLUGIN_ROOT>`。生效配置是派发角色、模型与审查组的唯一配置来源，按以下顺序合并，后者覆盖前者。
+从已加载的 `subagent-first/SKILL.md` 所在目录解析 `../..` 得到绝对路径 `<PLUGIN_ROOT>`。生效配置（Schema v2，`schemaVersion: 2`，不再支持 v1）是派发角色、模型与审查组的唯一配置来源，按以下顺序合并，后者覆盖前者。
 
 1. `<PLUGIN_ROOT>/config/roles.default.json`
 2. `${GBSTACK_USER_CONFIG_DIR:-$HOME/.gemini/config/gbstack}/roles.json`
-3. `<repo>/.agents/gbstack/roles.json`
+3. `<repo>/.agents/gbstack/roles.json`（安全边界：默认禁止项目层定义或覆写非 `null` 的 `roles.*.cli`，防止不可信仓库注入命令；确需项目级定义时须显式传 `--allow-project-cli` 或设 `GBSTACK_ALLOW_PROJECT_CLI=1`）
 
-会话开始时，Coordinator 必须运行 `<PLUGIN_ROOT>/scripts/resolve-roles.sh --cwd <WORKDIR> dump`。退出码 `1` 表示配置校验失败，停止派发并报告原始错误。解析器报错时先处理错误再派发。派发前以同一 `--cwd` 用 `slot <name>` 解析槽位、`role <id>` 查询角色、`review <id>` 查询审查组。`slot` 的 `kind` 指明读取 `role` 还是 `review`，后者用 `review.memberRoles` 获取成员。退出码 `3` 表示查询项缺失或已禁用，按不可用处理并报告受影响的派发。
+会话开始时，Coordinator 必须运行 `<PLUGIN_ROOT>/scripts/resolve-roles.sh --cwd <WORKDIR> dump`。退出码 `1` 表示配置校验失败，停止派发并报告原始错误。解析器报错时先处理错误再派发。派发前以同一 `--cwd` 用 `slot <name>` 解析槽位、`role <id>` 查询角色、`review <id>` 查询审查组，并可用 `cli-roles [--format json|lines]` 列出当前启用的 CLI 角色。`slot` 的 `kind` 指明读取 `role` 还是 `review`，后者用 `review.memberRoles` 获取成员。退出码 `3` 表示查询项缺失或已禁用，按不可用处理并报告受影响的派发。
 
 | 槽位 | 剧本或技能中的用途 |
 |---|---|
@@ -31,16 +31,14 @@ description: >-
 | `monitor` | `monitor`，仅多路并发写或长耗时多阶段接力时按需启用 |
 | `review` | 常规 Review Gate 和 PR 的独立 `reviewer` |
 | `interrogate` | 对抗审查的 `reviewer` |
-| `codexReview` | 用户显式要求 Codex 审查时的 `reviewer` |
 | `council` | 显式 [`council`](../council/SKILL.md) 的异构 `reviewer` |
 
-用户可在 `roles.json` 增加、移除或覆盖角色，移除后同步调整引用。自定义角色 ID 可直接通过 `role <id>` 解析并派发。
+用户可在 `roles.json` 增加、移除或覆盖角色，移除后同步调整引用。自定义角色 ID 可直接通过 `role <id>` 解析并派发。用户显式指定某种外部 CLI 审查（如 `codex`、`pi`、`omp`、`claude`）时，不再通过固定槽位，而是直接按 `resolve-roles.sh role <id>` 或自定义 `review <id>` 解析派发。
 
-- 按解析结果中的 `mode`、`readonly`、`workspace` 派发，并发写优先用已配置的 `concurrentWorkspace`，只用 `share` / `branch` 隔离写入。Native 派发显式传 `native.model`，Codex 派发显式传 `codex.outerModel` 作为外层模型，并用 `codex.profile` 运行内层。只有用户明确指定时才从 `codex.extraProfiles` 选用备选 profile。型号不可用时先用 `swarm{action:"models"}` 核对并报告，低配额按第五节切换。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
-- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: Codex` 或 `执行模式: Native`。Codex 另填 `PROFILE`、`SANDBOX`（取 `codex.sandbox`，审查固定只读）与是否为非 Git 目录，隔离写先 `pwd` 取 `-C` 路径。
-- 解析结果的 `requiresCodexPreflight` 为真时，在派发前对每个实际使用的 profile 只读预检。角色取 `codex.profile` 或明确选定的备选 profile。审查组用 `review.codexProfiles` 核对成员所需的 profile。可在目标目录运行 `(cd -- '<WORKDIR>' && '<PLUGIN_ROOT>/scripts/check-codex.sh' '<profile>')`，或做等效的只读检查。已通过的 profile 在同会话缓存，切未检 profile、报错或环境变化时重检。
-- 等效检查先用 `command -v codex` 找可执行文件，再尝试 `$HOME/.local/bin/codex`。两处均无可执行文件时按退出码 `127` 停派并报告。`codex login status` 须退出 0 且输出含 `Logged in`，所需 profile 须通过 `test -f` 和 `test -r` 检查 `${CODEX_HOME:-$HOME/.codex}/<profile>.config.toml`。可像随附脚本一样为登录状态查询将 `TMPDIR` 临时设为 Codex home 的物理绝对路径，以阻止创建 PATH 别名。
-- 其他预检失败先报告具体缺项。仅当 `codex.fallbackToNativeOnPreflightFail` 为真、有 `native` 配置、用户未锁定执行模式且审查组仍满足第四、五节要求时，才改走 Native。无法回退时停止派发该角色。显式 Codex 审查或 `council` 的所需成员预检失败且该标志为假时，停止该轮派发。运行期回退由 `codex.fallbackToNativeOnTransientFailure` 和第五节约束。显式选择 Native 时按实际选定的模式派发，免 Codex 预检。
+- 按解析结果中的 `mode`（`"native"` | `"cli"`）、`readonly`、`workspace` 派发，并发写优先用已配置的 `concurrentWorkspace`，只用 `share` / `branch` 隔离写入。Native 派发显式传 `native.model`。CLI 派发显式传 `cli.outerModel`（默认 `gemini-3.8-flash-medium`）作为薄 Swarm 外层模型，由外层调用 `<PLUGIN_ROOT>/scripts/run-cli.sh` 驱动 `roles.*.cli` 中配置的外部 CLI 执行内层任务。型号不可用时先用 `swarm{action:"models"}` 核对并报告，低配额按第五节切换。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
+- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: CLI` 或 `执行模式: Native`。CLI 模式另填 `ROLE_ID`、`PLUGIN_ROOT`，写入任务附 `--baseline-json`（仅允许 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键，未知键会被 `run-cli.sh` 以退出码 `2` 拒绝）及可选 `--add-dir` / `--timeout`，外层隔离写先 `pwd` 取 `--cwd`。
+- 解析结果的 `requiresCliPreflight` 为真时，在派发前对每个实际使用的 CLI 角色（`cliRoles`）或审查组执行只读预检：运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' (--role <ROLE_ID> | --review <REVIEW_ID> | --all)`，其中 `--review` 必须传 `slot` 解析出的 `review.id`（不可直接传槽位名）。退出码语义：`0` 通过、`1` 预检或配置失败、`2` 参数错误、`3` 缺失或已禁用、`127` 找不到可执行文件（`cli.binary` 及 `cli.fallbackBinaries`）。已通过的 `ROLE_ID` 在同会话缓存，切未检角色、报错或环境变化时重检。
+- 预检失败先报告具体缺项与退出码。仅当 `cli.fallbackToNativeOnPreflightFail` 为真、有 `native` 配置、用户未锁定执行模式且审查组仍满足第四、五节要求时，才改走 Native。无法回退时停止派发该角色。显式指定的 CLI 审查或 `council` 的所需成员预检失败且该标志为假时，停止该轮派发。运行期回退由 `cli.fallbackToNativeOnTransientFailure` 和第五节约束。显式选择 Native 时按实际选定的模式派发，免外部 CLI 预检。
 
 ## 三、并行协作、轻量基线与自包含 Brief
 
@@ -53,11 +51,11 @@ description: >-
 
 ## 四、审查门禁、验收、逐块回退、独占提交与清理
 
-- **Review Gate** 派发前判定，验收发现风险可补派。局部、常规或有自动化测试／构建兜底的改动默认不审。高风险、复杂、涉及核心逻辑或接口、安全、并发、迁移、需验证的行为缺少自动验证，或用户要求时，按 `slots.review` 并行派独立只读成员交叉核验。用户显式要求 Codex 审查时用 `slots.codexReview`，显式 `council` 时用 `slots.council`，对抗审查用 `slots.interrogate`。用户显式锁定单一路审查时仅派该路，并在缺少异构覆盖时标 `未审完:`。所有审查均重点防范无运行时证据的防御兜底（多余空值检查、异常吞咽、假想分支、过度包装）。实现与审查均只向 `@coordinator [done]` 交接。
+- **Review Gate** 派发前判定，验收发现风险可补派。局部、常规或有自动化测试／构建兜底的改动默认不审。高风险、复杂、涉及核心逻辑或接口、安全、并发、迁移、需验证的行为缺少自动验证，或用户要求时，按 `slots.review` 并行派独立只读成员交叉核验。用户显式指定某种外部 CLI 审查时按 `resolve-roles.sh role <id>` 或自定义 `review <id>` 解析派发，显式 `council` 时用 `slots.council`，对抗审查用 `slots.interrogate`。用户显式锁定单一路审查时仅派该路，并在缺少异构覆盖时标 `未审完:`。所有审查均重点防范无运行时证据的防御兜底（多余空值检查、异常吞咽、假想分支、过度包装）。实现与审查均只向 `@coordinator [done]` 交接。
 - 按槽位关联的 `reviews.*` 的 `members` 派发，使用解析后的 `memberRoles`。按 `requireDistinctProviders` 和 `minDistinctProviders` 核对实际审查的提供商覆盖，回退受 `allowSameProviderFallback` 约束。出现缺家或未审完时分别按 `onMissingProvider` 和 `onIncomplete` 处理（见第五节）。复审遵守 `maxRounds` 及下述返工限制。
-- 区分「已返回／待验收」「未通过」「已完成」。核验实际 diff、指定命令真实退出码与输出或人工证据。并发写先合入主工作区再复验总 diff，按需派审。Coordinator 汇总审查时逐条判断**是否值得做**，核验运行时证据和真实触发风险，权衡修复收益、引入的复杂度与维护成本。对任一审查方（含显式调用的 Codex）提出的无证据防御兜底或低收益项，直接驳回并记录理由。公共接口或行为边界有分歧时交用户拍板。只派 `worker` 修复有实证且值得做的阻塞项，解决后复验。
+- 区分「已返回／待验收」「未通过」「已完成」。核验实际 diff、指定命令真实退出码与输出或人工证据。并发写先合入主工作区再复验总 diff，按需派审。Coordinator 汇总审查时逐条判断**是否值得做**，核验运行时证据和真实触发风险，权衡修复收益、引入的复杂度与维护成本。对任一审查方（含显式调用的外部 CLI 审查方）提出的无证据防御兜底或低收益项，直接驳回并记录理由。公共接口或行为边界有分歧时交用户拍板。只派 `worker` 修复有实证且值得做的阻塞项，解决后复验。
 - 越界先问理由，按基线逐块回退，禁整文件回退。归属不清则保留并请用户决定。回退后复核改动并重跑验证。
-- 非审查收口返工（如同因卡死或未推进）确认停写后，单任务最多重试 1 次，仍失败即停止并上报。非 `council` 审查已有实证推进、只剩经裁决值得修的独立审查局部阻塞项时，单任务另给最多 1 次审查收口返工，不占前述重试额度。收口后仍有任意阻塞项、未推进或复验失败即停止并上报。显式 `council` 多轮评议按 [`../council/SKILL.md`](../council/SKILL.md) 的轮次上限执行，其间未推进或复验失败仍受前述非审查返工 1 次上限约束。两类额度均为单任务累计上限，互不挪用，错误变化、新增阻塞项、刷新基线或切换模型均不重置额度。返工 brief 带当前有效基线。Native 保持原角色、成员名与工作区，必要时用 `swarm{action:"model", name, model}` 原地切到 `native.reworkModel`，省略时用 `native.model`。Codex 唤醒原成员，沿用 `codex.profile` 或用户已选定的备选 profile。
+- 非审查收口返工（如同因卡死或未推进）确认停写后，单任务最多重试 1 次，仍失败即停止并上报。非 `council` 审查已有实证推进、只剩经裁决值得修的独立审查局部阻塞项时，单任务另给最多 1 次审查收口返工，不占前述重试额度。收口后仍有任意阻塞项、未推进或复验失败即停止并上报。显式 `council` 多轮评议按 [`../council/SKILL.md`](../council/SKILL.md) 的轮次上限执行，其间未推进或复验失败仍受前述非审查返工 1 次上限约束。两类额度均为单任务累计上限，互不挪用，错误变化、新增阻塞项、刷新基线或切换模型均不重置额度。返工 brief 带当前有效基线。Native 保持原角色、成员名与工作区，必要时用 `swarm{action:"model", name, model}` 原地切到 `native.reworkModel`，省略时用 `native.model`。CLI 模式唤醒原成员，继续使用原 `ROLE_ID` 及对应 `roles.*.cli` 配置。
 - Coordinator 验收后独占 `git add -- <明确路径>` 和 `git commit`。未授权不得 `push`。
 - 集成验收后主动 `kill` 无后续任务的完工业务成员，先确认 `waiting`，需提交时等 `git commit` 成功。只读交付消费后可 `kill`。异常、取消或驳回的隔离工作区先披露并确认去留再 `kill`。
 - 有 `monitor` 时在最终汇报前向面板发送无 `@` 的 `[done] <summary>`。
@@ -65,9 +63,9 @@ description: >-
 ## 五、环境阻塞与运行期故障恢复
 
 - 宿主、沙箱、权限或网络等环境阻塞时，外层和 Coordinator 禁止代劳或静默切 Native 绕过限制。上报原始报错、卡点、停写状态、现场残留和选项，等用户拍板。未授权不清理。
-- 低配额时，用 `swarm{action:"model", name, model}` 原地切到已配置的 `native.lowQuotaFallback` 或 `codex.outerLowQuotaFallback` 并告知用户。Codex 外层切换沿用内层 profile 和提供商。Native 审查成员切换前按 `native.lowQuotaFallbackProvider` 核对切换后的覆盖。只有 `allowSameProviderFallback` 明确为真时才可用已由其他成员覆盖的提供商兜底，且仍须满足适用的提供商数量门槛。无法确认或满足覆盖时按缺家处理。
+- 低配额时，用 `swarm{action:"model", name, model}` 原地切到已配置的 `native.lowQuotaFallback` 或 `cli.outerLowQuotaFallback` 并告知用户。CLI 外层切换沿用原 `ROLE_ID`、内层 CLI 与提供商。Native 审查成员切换前按 `native.lowQuotaFallbackProvider` 核对切换后的覆盖。只有 `allowSameProviderFallback` 明确为真时才可用已由其他成员覆盖的提供商兜底，且仍须满足适用的提供商数量门槛。无法确认或满足覆盖时按缺家处理。
 - 缺家时执行 `onMissingProvider`，成员失败、证据不全或未覆盖指定范围时执行 `onIncomplete`。`block` 停下交用户决定，`mark-incomplete` 保留已有获授权结果并标 `未审完:`，说明缺项和原因。两种情况下均不得按完整通过放行，也不得静默替换成员。显式 `council` 另按其[收敛规则](../council/SKILL.md) 执行。
-- Codex 内层故障时先确认进程退出和停写，只读核对残留并报告实际退出码及报错。环境阻塞按本节首条处理。仅在 `codex.fallbackToNativeOnTransientFailure` 为真、有 `native` 配置、未锁定 Codex、且确认是配额、限流、登录失效或服务暂不可用并相对基线零改动时，才可用 `native.model`（返工用 `native.reworkModel`）回退。审查回退还须满足提供商覆盖和回退约束，否则按缺家或未审完处理。有部分改动则保留现场上报。
+- CLI 内层故障（`run-cli.sh` 返回非零退出码 `1` / `2` / `3` / `4` / `5` / `124` / `127`）时，先确认进程退出和停写，核对 `GBSTACK_CLI_RESULT_JSON`（`exitCode`、`timedOut`、`emptyOutput`、`readonlyViolation`、`changedFiles`、`outOfScopeFiles`）并只读核对残留，如实报告实际退出码与报错。`readonly` 角色返回 `4`（篡改工作区）、`5`（空输出）或 `124`（超时）必须标 `未审完:`，严禁外层代审或代写。环境阻塞按本节首条处理。仅在 `cli.fallbackToNativeOnTransientFailure` 为真、有 `native` 配置、用户未锁定 CLI 模式、且确认是配额、限流、登录失效或服务暂不可用等瞬时故障并相对基线零改动（`changedFiles` 为空）时，才可用 `native.model`（返工用 `native.reworkModel`）回退。审查回退还须满足提供商覆盖和回退约束，否则按缺家或未审完处理。有部分改动则保留现场上报。
 
 ## 六、外部接口与汇报规范
 

@@ -1,6 +1,0 @@
-model = "gpt-6.2-astra"
-model_reasoning_effort = "xhigh"
-sandbox_mode = "read-only"
-
-[mcp_servers.node_repl]
-enabled = false

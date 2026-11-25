@@ -16,7 +16,7 @@ description: >-
 ## 2. 隔离对抗（Challenge）
 
 - 让对抗者独立检查同一快照和意图。使用只读环境或隔离临时副本、worktree。隔离环境须拷入范围内的未提交变更。
-- 顶层按 [`subagent-first`](../subagent-first/SKILL.md) 第二节定位 `<PLUGIN_ROOT>`，运行 `<PLUGIN_ROOT>/scripts/resolve-roles.sh --cwd <WORKDIR> slot interrogate` 解析 `slots.interrogate`。使用 `review.memberRoles` 中的只读成员，在 brief 中附各自非空的 `promptPath` 并要求先读。按成员的 `mode` 派发，`requiresCodexPreflight` 为真时按协调手册预检。
+- 顶层按 [`subagent-first`](../subagent-first/SKILL.md) 第二节定位 `<PLUGIN_ROOT>`，运行 `<PLUGIN_ROOT>/scripts/resolve-roles.sh --cwd <WORKDIR> slot interrogate` 解析 `slots.interrogate`。使用 `review.memberRoles` 中的只读成员，在 brief 中附各自非空的 `promptPath` 并要求先读。按成员的 `mode` 派发（`native` 取 `native.model`；`cli` 取 `cli.outerModel` 并在 brief 写明 `执行模式: CLI`、`ROLE_ID` 与 `PLUGIN_ROOT`），`requiresCliPreflight` 为真时运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' --review <review.id>`（或对 `review.cliRoles` 逐个传 `--role <id>`；不可将槽位名 `interrogate` 直接传给 `--review`）按协调手册预检。
 - 成员在任何目录（包括隔离副本和 worktree）都严格只读。禁止落盘脚本、测试夹具或临时产物，只执行无写入副作用的只读检查命令。确需落盘时，由具备写入授权且已核对有效基线的角色在隔离环境预先准备。
 - 槽位不可用时，报告未覆盖的审查。成员不可用或低配额导致缺家时按 `review.onMissingProvider`，成员失败或证据不全时按 `review.onIncomplete`，回退须遵守 `review.allowSameProviderFallback` 和提供商数量门槛。按协调手册第五节报告 `未审完:`，严禁静默替换或按完整审查放行。Swarm 仅由顶层 Coordinator 派发，成员只完成自身审查并交回 Coordinator。
 - 单机已派发成员（如 `invoke_subagent` 子代理或 `run_workflow` 步骤）只在当前上下文内完成对抗验证并回报调用方，禁止二次派活。顶层已获调用授权且宿主能按解析配置派发时，可用 `invoke_subagent` 在隔离副本或 worktree 中独立挑战，例如分别检查边界输入、状态一致性和回归。无法独立调用时分视角检查，如实说明来源和缺失的异构覆盖。

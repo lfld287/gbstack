@@ -8,7 +8,30 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "resolve-roles.sh"
-PROFILES = ["worker-codex", "worker-codex-xhigh", "reviewer-codex"]
+
+
+def custom_cli_role(
+    *,
+    provider="pi-ai",
+    binary="pi",
+    prompt_input="arg",
+    outer_model="gemini-3.8-flash-medium",
+    **extra,
+):
+    cfg = {
+        "provider": provider,
+        "binary": binary,
+        "promptInput": prompt_input,
+        "outerModel": outer_model,
+    }
+    cfg.update(extra)
+    return {
+        "readonly": False,
+        "workspace": "inherit",
+        "prompt": None,
+        "mode": "cli",
+        "cli": cfg,
+    }
 
 
 class ResolveRolesTest(unittest.TestCase):
@@ -68,15 +91,20 @@ class ResolveRolesTest(unittest.TestCase):
         self.config(self.project_config, contents)
         return self.invoke("--project-config-dir", self.project_dir, *args)
 
-    def invalid(self, contents, path):
-        self.failure(self.override(contents, "validate"), 1, "project", self.project_config, path)
+    def invalid(self, contents, *details):
+        self.failure(self.override(contents, "validate"), 1, "project", self.project_config, *details)
+
+    def invalid_user(self, contents, *details):
+        self.config(self.user_config, contents)
+        self.failure(
+            self.invoke("--user-config-dir", self.user_dir, "validate"),
+            1, "user", self.user_config, *details,
+        )
 
     def role(self, role_id, **fields):
-        return {
-            "roles": {role_id: fields},
-        }
+        return {"roles": {role_id: fields}}
 
-    def test_builtin_commands_and_expanded_roles(self):
+    def test_builtin_commands_and_schema_v2_defaults(self):
         result = self.success("validate")
         self.assertEqual(result, {
             "ok": True,
@@ -86,11 +114,11 @@ class ResolveRolesTest(unittest.TestCase):
                 "project": None,
             },
             "roleCount": 8,
-            "reviewCount": 3,
-            "codexProfileCount": 3,
+            "reviewCount": 2,
+            "cliRoleCount": 2,
         })
         dump = self.success("dump")
-        self.assertEqual(dump["schemaVersion"], 1)
+        self.assertEqual(dump["schemaVersion"], 2)
         self.assertEqual(dump["pluginRoot"], str(ROOT))
         self.assertEqual(dump["sources"], result["sources"])
         self.assertEqual(list(dump["roles"]), [
@@ -100,13 +128,35 @@ class ResolveRolesTest(unittest.TestCase):
         self.assertEqual(dump["slots"], {
             "coordinator": "coordinator", "recon": "scout", "plan": "plan",
             "implement": "worker", "monitor": "monitor", "review": "default",
-            "interrogate": "default", "codexReview": "codex", "council": "council",
+            "interrogate": "default", "council": "council",
         })
+        self.assertEqual(dump["cliRoles"], [
+            {
+                "id": "worker",
+                "provider": "openai",
+                "binary": "codex",
+                "readonly": False,
+                "hasPreflight": True,
+            },
+            {
+                "id": "reviewer-codex",
+                "provider": "openai",
+                "binary": "codex",
+                "readonly": True,
+                "hasPreflight": True,
+            },
+        ])
         worker = self.success("role", "worker")
         self.assertEqual(worker, dump["roles"]["worker"])
         self.assertEqual(worker["id"], "worker")
         self.assertEqual(worker["effectiveProvider"], "openai")
-        self.assertTrue(worker["requiresCodexPreflight"])
+        self.assertTrue(worker["requiresCliPreflight"])
+        self.assertEqual(worker["cli"]["outerModel"], "gemini-3.8-flash-medium")
+        self.assertEqual(worker["cli"]["timeoutSeconds"], 600)
+        self.assertEqual(worker["cli"]["preflight"]["timeoutSeconds"], 30)
+        self.assertEqual(worker["cli"]["preflight"]["env"], {})
+        self.assertEqual(worker["cli"]["env"], {})
+        self.assertEqual(worker["cli"]["promptPrefixArgs"], [])
         self.assertEqual(worker["native"]["reworkModel"], "gemini-4-neon-high")
         self.assertEqual(worker["promptPath"], str(ROOT / "agents" / "worker.md"))
         self.assertEqual(worker["promptSource"], "default")
@@ -117,25 +167,108 @@ class ResolveRolesTest(unittest.TestCase):
         self.assertIsNone(coordinator["promptPath"])
         self.assertIsNone(coordinator["promptSource"])
         self.assertEqual(coordinator["native"]["reworkModel"], coordinator["native"]["model"])
-        self.assertFalse(coordinator["requiresCodexPreflight"])
+        self.assertFalse(coordinator["requiresCliPreflight"])
         self.assertEqual(dump["roles"]["monitor"]["skill"], "swarm_monitor")
-        for name, providers, profiles in [
+
+        for name, providers, cli_roles in [
             ("default", ["google", "anthropic"], []),
-            ("codex", ["openai", "google"], ["reviewer-codex"]),
             ("council", ["openai", "google", "anthropic"], ["reviewer-codex"]),
         ]:
             with self.subTest(review=name):
                 review = self.success("review", name)
                 self.assertEqual(review["id"], name)
                 self.assertEqual(review["distinctProviders"], providers)
-                self.assertEqual(review["requiresCodexPreflight"], bool(profiles))
-                self.assertEqual(review["codexProfiles"], profiles)
+                self.assertEqual(review["requiresCliPreflight"], bool(cli_roles))
+                self.assertEqual(review["cliRoles"], cli_roles)
                 self.assertEqual(review["memberRoles"], [dump["roles"][member] for member in review["members"]])
+
         council = self.success("review", "council")
         self.assertEqual(self.success("slot", "council"), {
             "slot": "council", "kind": "review", "target": "council", "review": council,
         })
         self.assertEqual(council["maxRounds"], 3)
+
+    def test_v1_migration_errors(self):
+        self.invalid({"schemaVersion": 1}, "$.schemaVersion", "schemaVersion 2", "cli")
+        self.invalid(self.role("worker", mode="codex"), "$.roles.worker.mode", "cli")
+        self.invalid(self.role("worker", codex={"provider": "openai"}), "$.roles.worker.codex", "cli")
+        self.invalid({"slots": {"codexReview": "council"}}, "$.slots.codexReview", "schemaVersion 2")
+
+    def test_custom_pi_and_omp_cli_roles_and_normalization(self):
+        self.config(self.user_config, {
+            "roles": {
+                "pi-worker": custom_cli_role(
+                    provider="anthropic",
+                    binary="pi",
+                    prompt_input="arg",
+                    promptPrefixArgs=["-p"],
+                    args=["--print", "--cwd", "{workdir}"],
+                    extraDirArgs=["--add-dir", "{dir}"],
+                    env={"PI_TELEMETRY": "0"},
+                ),
+                "omp-worker": custom_cli_role(
+                    provider="openai",
+                    binary="/opt/omp/bin/omp",
+                    fallbackBinaries=["omp"],
+                    prompt_input="stdin",
+                    stdinArg="--stdin",
+                    nonGitArgs=["--no-git"],
+                    timeoutSeconds=120,
+                    preflight={
+                        "command": ["{binary}", "--version"],
+                        "outputContains": "omp",
+                        "env": {"OMP_CHECK": "1"},
+                        "timeoutSeconds": 10,
+                    },
+                ),
+            },
+        })
+        options = ("--user-config-dir", self.user_dir)
+        pi_role = self.success(*options, "role", "pi-worker")
+        self.assertEqual(pi_role["effectiveProvider"], "anthropic")
+        self.assertTrue(pi_role["requiresCliPreflight"])
+        self.assertEqual(pi_role["cli"]["fallbackBinaries"], [])
+        self.assertEqual(pi_role["cli"]["nonGitArgs"], [])
+        self.assertEqual(pi_role["cli"]["promptPrefixArgs"], ["-p"])
+        self.assertEqual(pi_role["cli"]["env"], {"PI_TELEMETRY": "0"})
+        self.assertEqual(pi_role["cli"]["timeoutSeconds"], 600)
+        self.assertIsNone(pi_role["cli"]["preflight"])
+        self.assertFalse(pi_role["cli"]["fallbackToNativeOnPreflightFail"])
+        self.assertFalse(pi_role["cli"]["fallbackToNativeOnTransientFailure"])
+
+        omp_role = self.success(*options, "role", "omp-worker")
+        self.assertEqual(omp_role["cli"]["timeoutSeconds"], 120)
+        self.assertEqual(omp_role["cli"]["preflight"], {
+            "command": ["{binary}", "--version"],
+            "outputContains": "omp",
+            "env": {"OMP_CHECK": "1"},
+            "timeoutSeconds": 10,
+        })
+
+        cli_roles = self.success(*options, "cli-roles")
+        self.assertEqual([entry["id"] for entry in cli_roles], ["worker", "reviewer-codex", "pi-worker", "omp-worker"])
+        self.assertFalse(cli_roles[2]["hasPreflight"])
+        self.assertTrue(cli_roles[3]["hasPreflight"])
+
+    def test_cli_roles_subcommand(self):
+        entries = self.success("cli-roles")
+        self.assertEqual([e["id"] for e in entries], ["worker", "reviewer-codex"])
+        lines = self.invoke("cli-roles", "--format", "lines")
+        self.assertEqual((lines.returncode, lines.stdout, lines.stderr), (0, "worker\nreviewer-codex\n", ""))
+
+        # Explicit selection: missing -> 3, native without cli -> 1, native with cli -> 0
+        self.failure(self.invoke("cli-roles", "missing"), 3, "missing")
+        self.failure(self.invoke("cli-roles", "scout"), 1, "scout", "cli")
+
+        self.config(self.project_config, {
+            "roles": {
+                "worker": {"mode": "native"},
+                "reviewer-codex": {"mode": "native", "native": {"provider": "test", "model": "m"}},
+            },
+        })
+        options = ("--project-config-dir", self.project_dir)
+        self.assertEqual(self.success(*options, "cli-roles"), [])
+        self.assertEqual([e["id"] for e in self.success(*options, "cli-roles", "worker")], ["worker"])
 
     def test_null_rework_model_uses_native_model(self):
         self.config(self.project_config, self.role("worker", native={"reworkModel": None}))
@@ -146,11 +279,11 @@ class ResolveRolesTest(unittest.TestCase):
         user_prompt = self.write(self.user_dir / "agents" / "worker.md", "user")
         project_prompt = self.write(self.project_dir / "agents" / "worker.md", "project")
         self.config(self.user_config, {
-            "roles": {"worker": {"native": {"model": "user-model"}, "codex": {"extraProfiles": ["user-extra"]}}},
+            "roles": {"worker": {"native": {"model": "user-model"}, "cli": {"args": ["--user"], "env": {"A": "1", "B": "2"}}}},
             "reviews": {"default": {"members": ["reviewer-claude", "reviewer-gemini"]}},
         })
         self.config(self.project_config, {
-            "roles": {"worker": {"native": {"lowQuotaFallback": None}, "codex": {"extraProfiles": []}}},
+            "roles": {"worker": {"native": {"lowQuotaFallback": None}}},
             "reviews": {"default": {"members": ["reviewer-gemini"], "minDistinctProviders": 1}},
         })
         options = ("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir)
@@ -159,7 +292,8 @@ class ResolveRolesTest(unittest.TestCase):
         self.assertEqual(worker["native"]["model"], "user-model")
         self.assertEqual(worker["native"]["provider"], "google")
         self.assertIsNone(worker["native"]["lowQuotaFallback"])
-        self.assertEqual(worker["codex"]["extraProfiles"], [])
+        self.assertEqual(worker["cli"]["args"], ["--user"])
+        self.assertEqual(worker["cli"]["env"], {"A": "1", "B": "2"})
         self.assertEqual(result["reviews"]["default"]["members"], ["reviewer-gemini"])
         self.assertEqual(result["sources"]["user"], str(self.user_config))
         self.assertEqual(result["sources"]["project"], str(self.project_config))
@@ -177,7 +311,7 @@ class ResolveRolesTest(unittest.TestCase):
         self.config(self.project_config, {
             "roles": {"worker": {
                 "prompt": None, "readonly": False, "workspace": "inherit", "mode": "native",
-                "native": {"provider": "test", "model": "fresh"}, "codex": None,
+                "native": {"provider": "test", "model": "fresh"}, "cli": None,
             }},
             "reviews": {"default": {
                 "members": ["reviewer-gemini"], "minDistinctProviders": 1,
@@ -191,7 +325,7 @@ class ResolveRolesTest(unittest.TestCase):
         self.assertNotIn("description", worker)
         self.assertNotIn("concurrentWorkspace", worker)
         self.assertEqual(worker["native"], {"provider": "test", "model": "fresh", "reworkModel": "fresh"})
-        self.assertIsNone(worker["codex"])
+        self.assertIsNone(worker["cli"])
         self.assertIsNone(worker["promptPath"])
         self.assertNotIn("description", dump["reviews"]["default"])
         self.assertNotIn("onIncomplete", dump["reviews"]["default"])
@@ -232,9 +366,11 @@ class ResolveRolesTest(unittest.TestCase):
         self.assertEqual(worker["native"]["model"], "alternate")
         self.assertEqual(worker["promptPath"], str(ROOT / "agents" / "worker.md"))
         self.assertEqual(self.success("validate", env=alternate_env)["sources"]["default"], str(default))
-        self.assertEqual(self.success("--default-config", default, "validate",
-                                      env=dict(alternate_env, GBSTACK_DEFAULT_CONFIG="missing"))["sources"]["default"],
-                         str(default))
+        self.assertEqual(
+            self.success("--default-config", default, "validate",
+                         env=dict(alternate_env, GBSTACK_DEFAULT_CONFIG="missing"))["sources"]["default"],
+            str(default),
+        )
 
     def test_project_discovery_git_directory_and_git_file(self):
         env = self.env.copy()
@@ -270,7 +406,7 @@ class ResolveRolesTest(unittest.TestCase):
         (self.repo / ".git").mkdir()
         self.assertIsNone(self.success("--cwd", nested, "validate", env=env)["sources"]["project"])
 
-    def test_project_probe_prompt_only_or_template_only(self):
+    def test_project_probe_prompt_only_ignores_templates(self):
         env = self.env.copy()
         del env["GBSTACK_PROJECT_CONFIG_DIR"]
         (self.repo / ".git").mkdir()
@@ -285,10 +421,11 @@ class ResolveRolesTest(unittest.TestCase):
         self.assertEqual(worker["native"]["model"], "gemini-4-hydrogen-high")
         prompt.unlink()
         prompt.parent.rmdir()
-        template = self.write(nearest / "templates" / "codex" / "worker-codex.config.toml", "")
-        profiles = self.success("--cwd", nested, "codex-profiles", "worker-codex", env=env)
-        self.assertEqual(profiles[0]["templatePath"], str(template))
-        self.assertEqual(profiles[0]["templateSource"], "project")
+        self.write(nearest / "templates" / "codex" / "worker-codex.config.toml", "")
+        self.assertEqual(
+            self.success("--cwd", nested, "validate", env=env)["sources"]["project"],
+            str(self.project_config),
+        )
 
     def test_custom_roles_and_direct_prompts(self):
         default_prompt = self.write(self.project_dir / "agents" / "custom.md", "custom")
@@ -317,70 +454,6 @@ class ResolveRolesTest(unittest.TestCase):
         for name in ["scout", "plan"]:
             self.assertEqual(self.success(*options, "role", name)["promptPath"], str(direct))
 
-    def test_profiles_order_dedup_formats_and_missing_templates(self):
-        profiles = self.success("codex-profiles")
-        self.assertEqual([entry["profile"] for entry in profiles], PROFILES)
-        for entry, sandbox, role in zip(profiles, ["workspace-write"] * 2 + ["read-only"], ["worker"] * 2 + ["reviewer-codex"]):
-            self.assertEqual(entry, {
-                "profile": entry["profile"], "sandbox": sandbox, "roles": [role],
-                "templatePath": str(ROOT / "templates" / "codex" / (entry["profile"] + ".config.toml")),
-                "templateSource": "default",
-            })
-        lines = self.invoke("codex-profiles", "--format", "lines")
-        self.assertEqual((lines.returncode, lines.stdout, lines.stderr), (0, "\n".join(PROFILES) + "\n", ""))
-        user_template = self.write(self.user_dir / "templates" / "codex" / "Custom.v2.config.toml", "user")
-        project_template = self.write(self.project_dir / "templates" / "codex" / "Custom.v2.config.toml", "project")
-        self.config(self.project_config, {
-            "roles": {
-                "worker": {"codex": {"extraProfiles": ["Custom.v2", "no-template"]}},
-                "other-worker": {"mode": "codex", "readonly": False, "workspace": "inherit", "prompt": None,
-                                 "codex": {"provider": "openai", "profile": "worker-codex", "sandbox": "workspace-write"}},
-            },
-        })
-        options = ("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir)
-        profiles = self.success(*options, "codex-profiles")
-        self.assertEqual([entry["profile"] for entry in profiles], ["worker-codex", "Custom.v2", "no-template", "reviewer-codex"])
-        self.assertEqual(profiles[0]["roles"], ["worker", "other-worker"])
-        self.assertEqual(profiles[1]["templatePath"], str(project_template))
-        self.assertEqual(profiles[1]["templateSource"], "project")
-        self.assertIsNone(profiles[2]["templatePath"])
-        self.assertIsNone(profiles[2]["templateSource"])
-        project_template.unlink()
-        explicit = self.success(*options, "codex-profiles", "unregistered", "Custom.v2", "worker-codex")
-        self.assertEqual([entry["profile"] for entry in explicit], ["unregistered", "Custom.v2", "worker-codex"])
-        self.assertIsNone(explicit[0]["templatePath"])
-        self.assertIsNone(explicit[0]["templateSource"])
-        self.assertEqual(explicit[1]["templatePath"], str(user_template))
-        self.assertEqual(explicit[1]["templateSource"], "user")
-        tsv = self.invoke(*options, "codex-profiles", "--format", "tsv", "Custom.v2", "no-template")
-        self.assertEqual((tsv.returncode, tsv.stdout, tsv.stderr),
-                         (0, "Custom.v2\t" + str(user_template) + "\tuser\nno-template\t\t\n", ""))
-
-    def test_native_roles_do_not_register_inherited_codex_profiles(self):
-        self.config(self.project_config, {"roles": {
-            "worker": {"mode": "native"},
-            "reviewer-codex": {"mode": "native", "native": {"provider": "test", "model": "test-model"}},
-            "scout": {"codex": {}},
-        }})
-        self.assertEqual(self.success("--project-config-dir", self.project_dir, "codex-profiles"), [])
-
-    def test_review_codex_profiles_exclude_extra_profiles(self):
-        extra = "reviewer-extra"
-        self.config(self.project_config, self.role("reviewer-codex", codex={"extraProfiles": [extra]}))
-        options = ("--project-config-dir", self.project_dir)
-        review = self.success(*options, "review", "council")
-        self.assertEqual(review["codexProfiles"], ["reviewer-codex"])
-        self.assertEqual([entry["profile"] for entry in self.success(*options, "codex-profiles")], [*PROFILES, extra])
-
-    def test_tsv_rejects_control_characters_without_partial_output(self):
-        for char in ["\t", "\n", "\r"]:
-            with self.subTest(char=repr(char)):
-                directory = self.base / ("project" + char)
-                self.write(directory / "templates" / "codex" / "custom.config.toml", "")
-                result = self.invoke("--project-config-dir", directory, "codex-profiles", "--format", "tsv",
-                                     "worker-codex", "custom")
-                self.failure(result, 1, "project", "custom.config.toml", "templatePath")
-
     def test_config_file_failures(self):
         for data in ["{", "[]", "null", '{"schemaVersion": NaN}']:
             with self.subTest(data=data):
@@ -401,21 +474,27 @@ class ResolveRolesTest(unittest.TestCase):
 
     def test_schema_unknown_keys_and_type_conflicts(self):
         cases = [
-            ({"schemaVersion": 2}, "$.schemaVersion"),
+            ({"schemaVersion": 3}, "$.schemaVersion"),
             ({"schemaVersion": True}, "$.schemaVersion"),
             ({"unknown": 1}, "$.unknown"),
             ({"slots": {"unknown": None}}, "$.slots.unknown"),
             (self.role("worker", unknown=True), "$.roles.worker.unknown"),
             (self.role("worker", native={"unknown": True}), "$.roles.worker.native.unknown"),
-            (self.role("worker", codex={"unknown": True}), "$.roles.worker.codex.unknown"),
             ({"reviews": {"default": {"unknown": True}}}, "$.reviews.default.unknown"),
             (self.role("worker", readonly=1), "$.roles.worker.readonly"),
             (self.role("worker", native=[]), "$.roles.worker.native"),
-            (self.role("worker", codex={"extraProfiles": {}}), "$.roles.worker.codex.extraProfiles"),
+        ]
+        user_cases = [
+            (self.role("worker", cli={"unknown": True}), "$.roles.worker.cli.unknown"),
+            (self.role("worker", cli={"preflight": {"unknown": True}}), "$.roles.worker.cli.preflight.unknown"),
+            (self.role("worker", cli={"args": {}}), "$.roles.worker.cli.args"),
         ]
         for config, path in cases:
             with self.subTest(path=path, config=config):
                 self.invalid(config, path)
+        for config, path in user_cases:
+            with self.subTest(path=path, config=config):
+                self.invalid_user(config, path)
         self.config(self.user_config, self.role("worker", native={"model": "user"}))
         self.config(self.project_config, self.role("worker", native={"model": 123}))
         self.failure(self.invoke("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir, "validate"),
@@ -437,29 +516,39 @@ class ResolveRolesTest(unittest.TestCase):
         self.failure(self.override({"reviews": {"council": None}}, "validate"), 1, "$.slots.council")
         self.invalid(self.role("coordinator", workspace="inherit"), "$.roles.coordinator.workspace")
 
-    def test_execution_mode_sandbox_and_profile_validation(self):
-        cases = [
+    def test_execution_mode_and_cli_validation(self):
+        project_cases = [
             (self.role("scout", native=None), "$.roles.scout.native"),
-            (self.role("worker", codex=None), "$.roles.worker.codex"),
-            (self.role("worker", codex={"profile": None}), "$.roles.worker.codex.profile"),
-            (self.role("worker", native=None), "$.roles.worker.codex.fallbackToNativeOnPreflightFail"),
-            (self.role("worker", native=None, codex={"fallbackToNativeOnPreflightFail": False}),
-             "$.roles.worker.codex.fallbackToNativeOnTransientFailure"),
-            (self.role("worker", codex={"sandbox": "danger-full-access"}), "$.roles.worker.codex.sandbox"),
-            (self.role("worker", mode="native", codex={"sandbox": "invalid"}), "$.roles.worker.codex.sandbox"),
-            (self.role("reviewer-codex", codex={"sandbox": "workspace-write"}), "$.roles.reviewer-codex.codex.sandbox"),
-            (self.role("scout", codex={"sandbox": "workspace-write"}), "$.roles.scout.codex.sandbox"),
-            (self.role("worker", codex={"profile": "bad/profile"}), "$.roles.worker.codex.profile"),
-            (self.role("worker", codex={"extraProfiles": ["x" * 65]}), "$.roles.worker.codex.extraProfiles[0]"),
-            (self.role("worker", codex={"extraProfiles": ["worker-codex"]}), "$.roles.worker.codex.extraProfiles[0]"),
-            (self.role("worker", codex={"extraProfiles": ["same", "same"]}), "$.roles.worker.codex.extraProfiles[1]"),
-            (self.role("reviewer-codex", codex={"profile": "worker-codex"}), "$.roles.reviewer-codex.codex.profile"),
-            (self.role("reviewer-codex", codex={"extraProfiles": ["worker-codex-xhigh"]}),
-             "$.roles.reviewer-codex.codex.extraProfiles[0]"),
+            (self.role("worker", cli=None), "$.roles.worker.cli"),
+            (self.role("worker", native=None), "$.roles.worker.cli.fallbackToNativeOnPreflightFail"),
         ]
-        for config, path in cases:
+        user_cases = [
+            (self.role("worker", cli={"provider": None}), "$.roles.worker.cli.provider"),
+            (self.role("worker", cli={"binary": None}), "$.roles.worker.cli.binary"),
+            (self.role("worker", cli={"outerModel": ""}), "$.roles.worker.cli.outerModel"),
+            (self.role("worker", cli={"promptInput": "file"}), "$.roles.worker.cli.promptInput"),
+            (self.role("worker", cli={"promptInput": "arg"}), "$.roles.worker.cli.stdinArg"),
+            (self.role("worker", cli={"promptPrefixArgs": ["-p"]}), "$.roles.worker.cli.promptPrefixArgs"),
+            (self.role("worker", cli={"fallbackBinaries": [""]}), "$.roles.worker.cli.fallbackBinaries[0]"),
+            (self.role("worker", cli={"args": [123]}), "$.roles.worker.cli.args[0]"),
+            (self.role("worker", cli={"env": {"": "1"}}), "$.roles.worker.cli.env"),
+            (self.role("worker", cli={"env": {"A": 1}}), "$.roles.worker.cli.env.A"),
+            (self.role("worker", cli={"env": {"A": None}}), "$.roles.worker.cli.env.A"),
+            (self.role("worker", cli={"timeoutSeconds": 0}), "$.roles.worker.cli.timeoutSeconds"),
+            (self.role("worker", cli={"timeoutSeconds": True}), "$.roles.worker.cli.timeoutSeconds"),
+            (self.role("worker", cli={"preflight": {"command": []}}), "$.roles.worker.cli.preflight.command"),
+            (self.role("worker", cli={"preflight": {"command": [""]}}), "$.roles.worker.cli.preflight.command[0]"),
+            (self.role("worker", cli={"preflight": {"timeoutSeconds": 0}}), "$.roles.worker.cli.preflight.timeoutSeconds"),
+            (self.role("worker", cli={"preflight": {"env": {"A": 1}}}), "$.roles.worker.cli.preflight.env.A"),
+            (self.role("worker", native=None, cli={"fallbackToNativeOnPreflightFail": False}),
+             "$.roles.worker.cli.fallbackToNativeOnTransientFailure"),
+        ]
+        for config, path in project_cases:
             with self.subTest(config=config):
                 self.invalid(config, path)
+        for config, path in user_cases:
+            with self.subTest(config=config):
+                self.invalid_user(config, path)
 
     def test_review_member_and_provider_validation(self):
         for members in [[], ["reviewer-gemini", "reviewer-gemini"], ["worker", "reviewer-gemini"],
@@ -528,21 +617,9 @@ class ResolveRolesTest(unittest.TestCase):
         leaf.chmod(0o600)
         self.assertEqual(self.success(*options, "role", "worker")["promptPath"], str(leaf))
 
-    def test_template_shadowing(self):
-        leaf = self.project_dir / "templates" / "codex" / "worker-codex.config.toml"
-        leaf.mkdir(parents=True)
-        options = ("--project-config-dir", self.project_dir)
-        self.failure(self.invoke(*options, "validate"), 1, "project", leaf, "worker-codex")
-        leaf.rmdir()
-        leaf.symlink_to(self.base / "missing")
-        self.failure(self.invoke(*options, "codex-profiles", "worker-codex"), 1, "project", leaf, "worker-codex")
-        leaf.unlink()
-        self.write(leaf, "").chmod(0)
-        self.failure(self.invoke(*options, "codex-profiles", "worker-codex"), 1, "project", leaf, "worker-codex")
-
     def test_cli_usage_and_missing_queries(self):
         for args in [(), ("unrecognized",), ("role",), ("slot", "plan", "extra"),
-                     ("codex-profiles", "--format", "yaml"), ("codex-profiles", "bad/name")]:
+                     ("cli-roles", "--format", "yaml")]:
             with self.subTest(args=args):
                 self.failure(self.invoke(*args), 2)
         for command in ["role", "slot", "review"]:
@@ -553,7 +630,7 @@ class ResolveRolesTest(unittest.TestCase):
         for flag in ["-h", "--help"]:
             result = self.invoke(flag)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("codex-profiles", result.stdout)
+            self.assertIn("cli-roles", result.stdout)
 
     def test_wrapper_resolves_symlinks_from_another_directory(self):
         intermediate = self.base / "intermediate"
@@ -566,6 +643,49 @@ class ResolveRolesTest(unittest.TestCase):
             cwd=self.repo, env=dict(self.env, PATH=str(self.base)), capture_output=True, text=True, check=False,
         )
         self.failure(result, 127, "python3")
+
+    def test_cross_layer_mode_flip_origin_attribution(self):
+        # Project layer flips scout to mode=cli without cli config -> blames project, not default
+        self.invalid(self.role("scout", mode="cli"), "$.roles.scout.cli")
+        # Project layer flips reviewer-codex to mode=native without native config -> blames project
+        self.invalid(self.role("reviewer-codex", mode="native"), "$.roles.reviewer-codex.native")
+        # User layer provides native with conflicting provider, project layer flips mode=native -> blames project
+        self.config(self.user_config, self.role("reviewer-codex", native={"provider": "google", "model": "m"}))
+        self.config(self.project_config, self.role("reviewer-codex", mode="native"))
+        result = self.invoke("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir, "validate")
+        self.failure(result, 1, "project", self.project_config, "$.reviews.council")
+
+    def test_project_cli_security_boundary(self):
+        # Default: project layer cannot define or override non-null cli
+        for bad in (
+            self.role("worker", cli={"args": ["--evil"]}),
+            self.role("worker", cli={}),
+            self.role("custom-cli", **custom_cli_role()),
+        ):
+            with self.subTest(bad=bad):
+                self.invalid(bad, "--allow-project-cli")
+
+        # Project layer MAY set cli: null (with mode: native), switch mode between pre-defined modes, or edit native
+        self.config(self.project_config, {
+            "roles": {
+                "worker": {"mode": "native", "cli": None, "native": {"model": "proj-native"}},
+            },
+        })
+        worker_native = self.success("--project-config-dir", self.project_dir, "role", "worker")
+        self.assertEqual(worker_native["mode"], "native")
+        self.assertIsNone(worker_native["cli"])
+
+        # Project layer MAY define/override cli when --allow-project-cli or GBSTACK_ALLOW_PROJECT_CLI=1 is set
+        self.config(self.project_config, {
+            "roles": {"pi-worker": custom_cli_role(args=["--proj"])},
+        })
+        pi_flag = self.success("--project-config-dir", self.project_dir, "--allow-project-cli", "role", "pi-worker")
+        self.assertEqual(pi_flag["cli"]["args"], ["--proj"])
+        pi_env = self.success(
+            "--project-config-dir", self.project_dir, "role", "pi-worker",
+            env=dict(self.env, GBSTACK_ALLOW_PROJECT_CLI="1"),
+        )
+        self.assertEqual(pi_env["cli"]["args"], ["--proj"])
 
 
 if __name__ == "__main__":

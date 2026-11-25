@@ -17,7 +17,7 @@ description: >-
 
 按 [`subagent-first`](../subagent-first/SKILL.md) 第二节定位 `<PLUGIN_ROOT>`，运行 `<PLUGIN_ROOT>/scripts/resolve-roles.sh --cwd <WORKDIR> slot council`。槽位为 `null` 时查询退出 `3`，报告不可用并停止本次评议。解析失败时报告错误并停止派发。
 
-- 用 `review.memberRoles` 派发严格只读的成员。依各自的 `mode` 取 `native.model` 或 `codex.profile`（另取 `codex.outerModel` 驱动外层），在 brief 中附非空的 `promptPath` 并要求先读，禁止二次派活。`review.requiresCodexPreflight` 为真时，按 `review.codexProfiles` 核对所需 profile，并按协调手册预检。
+- 用 `review.memberRoles` 派发严格只读的成员。依各自的 `mode` 取 `native.model` 或 `cli.outerModel`（默认 `gemini-3.8-flash-medium`；`CLI` 模式在 brief 中写明 `执行模式: CLI`、`ROLE_ID` 与 `PLUGIN_ROOT`，`Native` 写明 `执行模式: Native`），在 brief 中附非空的 `promptPath` 并要求先读，禁止二次派活。`review.requiresCliPreflight` 为真时，按 `slot council` 解析出的 `review.id` 运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' --review <review.id>`（或对 `review.cliRoles` 逐个传 `--role <id>`；不可直接硬编码槽位名）预检所需 CLI 成员。
 - 默认配置要求三家不同提供商。用户可点名覆盖成员或标为 `non-blocking`。派发前按 `review.requireDistinctProviders` 和 `review.minDistinctProviders` 核对实际覆盖。成员不可用、预检失败或低配额导致缺家时，按 `review.onMissingProvider` 报告缺项，默认停下交用户决定。回退遵守 `review.allowSameProviderFallback` 和协调手册的预检规则，严禁静默降级凑数。
 
 - **Swarm**　仅顶层 Coordinator 调度。完成所需预检后，并行用 `swarm{action:"add"}` 派发解析后的成员。
