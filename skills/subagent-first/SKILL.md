@@ -18,7 +18,7 @@ description: >-
 
 1. `<PLUGIN_ROOT>/config/roles.default.json`
 2. `${GBSTACK_USER_CONFIG_DIR:-$HOME/.gemini/config/gbstack}/roles.json`
-3. `<repo>/.agents/gbstack/roles.json`（安全边界：默认禁止项目层定义或覆写非 `null` 的 `roles.*.cli`，包括其中的 `rework` / `fallback`，防止不可信仓库注入命令；确需项目级定义时须显式传 `--allow-project-cli` 或设 `GBSTACK_ALLOW_PROJECT_CLI=1`）
+3. `<repo>/.agents/gbstack/roles.json`（安全边界：默认禁止项目层定义或覆写非 `null` 的 `roles.*.cli` 或 `roles.*.mcp`，包括其中的 `rework` / `fallback`，防止不可信仓库注入命令或覆写受控工具配置；确需项目级定义时须显式传 `--allow-project-cli` 或设 `GBSTACK_ALLOW_PROJECT_CLI=1`）
 
 会话开始时，Coordinator 必须运行 `<PLUGIN_ROOT>/scripts/resolve-roles.sh --cwd <WORKDIR> dump`。退出码 `1` 表示配置校验失败，停止派发并报告原始错误。解析器报错时先处理错误再派发。派发前以同一 `--cwd` 用 `slot <name>` 解析槽位、`role <id>` 查询角色、`review <id>` 查询审查组，并可用 `cli-roles [--format json|lines]` 列出当前启用的 CLI 角色。`slot` 的 `kind` 指明读取 `role` 还是 `review`，后者用 `review.memberRoles` 获取成员。退出码 `3` 表示查询项缺失或已禁用，按不可用处理并报告受影响的派发。
 
@@ -35,8 +35,9 @@ description: >-
 
 用户可在 `roles.json` 增加、移除或覆盖角色，移除后同步调整引用。自定义角色 ID 可直接通过 `role <id>` 解析并派发。用户显式指定某种外部 CLI 审查（如 `codex`、`pi`、`omp`、`claude`）时，不再通过固定槽位，而是直接按 `resolve-roles.sh role <id>` 或自定义 `review <id>` 解析派发。
 
-- 按解析结果中的 `mode`（`"native"` | `"cli"`）、`readonly`、`workspace` 派发，并发写优先用已配置的 `concurrentWorkspace`，只用 `share` / `branch` 隔离写入。Native 派发显式传 `native.model`。CLI 派发按 `CLI_PROFILE`（`default` | `rework` | `fallback`）显式传生效 profile 的 `outerModel` 作为薄 Swarm 外层模型；未覆写时沿用基础 `cli.outerModel`（内置角色用 `gemini-3.8-flash-medium`）。切换 profile 时同步调整外层模型。外层调用 `<PLUGIN_ROOT>/scripts/run-cli.sh --profile <profile>` 驱动内层 CLI，runner 和外层均不得自行重试或切换 profile。型号不可用时先用 `swarm{action:"models"}` 核对并报告，低配额按第五节切换。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
-- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: CLI` 或 `执行模式: Native`。CLI 模式另填 `ROLE_ID`、`PLUGIN_ROOT` 和可选的 `CLI_PROFILE: <profile>`（省略时为 `default`），写入任务附 `--baseline-json`（仅允许 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键，未知键会被 `run-cli.sh` 以退出码 `2` 拒绝）及可选 `--add-dir` / `--timeout`，外层隔离写先 `pwd` 取 `--cwd`。
+- 按解析结果中的 `mode`（`"native"` | `"cli"` | `"mcp"`）、`readonly`、`workspace` 派发，并发写优先用已配置的 `concurrentWorkspace`，只用 `share` / `branch` 隔离写入。Native 派发显式传 `native.model`。CLI 派发按 `CLI_PROFILE`（`default` | `rework` | `fallback`）显式传生效 profile 的 `outerModel` 作为薄 Swarm 外层模型；未覆写时沿用基础 `cli.outerModel`（内置角色用 `gemini-3.8-flash-medium`）。切换 profile 时同步调整外层模型。外层调用 `<PLUGIN_ROOT>/scripts/run-cli.sh --profile <profile>` 驱动内层 CLI，runner 和外层均不得自行重试或切换 profile。型号不可用时先用 `swarm{action:"models"}` 核对并报告，低配额按第五节切换。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
+- **`mode: "mcp"` 路由规程（Gate-M 实测结论）**：`swarm{action:"add"}` 派生的 Swarm worker 不继承任何 MCP 工具，因此 `mode: "mcp"` 角色**不由 `swarm{action:"add"}` 派发外层代理**，而是由顶层 Coordinator 直接调用 `mcp_gbstack_pi-rpc_*`（`pi_run`、`pi_wait`、`pi_steer`、`pi_abort`、`pi_sessions`）驱动常驻 `pi` 会话池（详见 [`../pi-rpc/SKILL.md`](../pi-rpc/SKILL.md)）；`requiresCliPreflight` 为 `false`，免外部 CLI 预检。调用时仍须严格遵守 4 键 `baseline` 校验（只读任务传 `readonly: true`）、并发写各自隔离到独立 `cwd` / `git worktree`、Review Gate 与 Coordinator 独占 `git add` / `git commit`。
+- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: CLI`、`执行模式: Native` 或 `执行模式: MCP`。CLI 模式另填 `ROLE_ID`、`PLUGIN_ROOT` 和可选的 `CLI_PROFILE: <profile>`（省略时为 `default`），写入任务附 `--baseline-json`（仅允许 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键，未知键会被 `run-cli.sh` 以退出码 `2` 拒绝）及可选 `--add-dir` / `--timeout`，外层隔离写先 `pwd` 取 `--cwd`。
 - 解析结果的 `requiresCliPreflight` 为真时，在派发前对每个实际使用的 CLI 角色（`cliRoles`）或审查组执行只读预检：运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' (--role <ROLE_ID> | --review <REVIEW_ID> | --all) [--profile <profile>]`。`--profile` 支持 `default`（缺省）、`rework`、`fallback`、`all`；`--review` 必须传 `slot` 解析出的 `review.id`（不可直接传槽位名）。退出码语义：`0` 通过、`1` 预检或配置失败、`2` 参数错误或显式指定的角色未配置 fallback、`3` 缺失或已禁用、`127` 找不到可执行文件（生效 profile 的 `binary` 及 `fallbackBinaries`）。显式使用 `--role <ROLE_ID> --profile fallback` 时，若该角色未配置 `cli.fallback`，退出 `2`。批量使用 `--review <REVIEW_ID>` 或 `--all` 搭配 `--profile fallback` 时，只预检目标范围内已配置 `cli.fallback` 的 CLI 角色，跳过未配置的角色；若没有符合条件的角色，输出跳过提示并退出 `0`。同会话按 `(ROLE_ID, profile)` 缓存通过结果，切到未检组合、报错或环境变化时重检。跳过的角色不得记入 `(ROLE_ID, fallback)` 预检通过缓存。
 - 预检失败先报告具体缺项与退出码，再按顺序处理：① 已配置 `cli.fallback`、当前未在用 `fallback`，且用户未锁定主工具/主模型时，先运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' --role <ROLE_ID> --profile fallback`；通过后在 brief 指定 `CLI_PROFILE: fallback`，让 runner 用 `--profile fallback`，并按生效的 `outerModel` 切换外层模型。② 没有可用的 CLI fallback 时，仅当 `cli.fallbackToNativeOnPreflightFail` 为真、有 `native` 配置且用户未锁定 CLI 执行模式时才改走 Native。审查回退均须满足第四、五节的提供商约束；无可用回退时停止派发该角色并报告，显式指定的 CLI 审查或 `council` 缺少所需成员时停止该轮派发。显式选择 Native 时免外部 CLI 预检。
 
@@ -124,3 +125,4 @@ description: >-
 | `correct` | 纠偏与错误前提反驳后的路径修正 | [`../correct/SKILL.md`](../correct/SKILL.md) |
 | `sharpen` | 需求、指令与验收标准的精准化打磨 | [`../sharpen/SKILL.md`](../sharpen/SKILL.md) |
 | `council` | 三家异构模型多轮评审与收敛 | [`../council/SKILL.md`](../council/SKILL.md) |
+| `pi-rpc` | 常驻 `pi --mode rpc` MCP 工具池驱动与热会话复用 | [`../pi-rpc/SKILL.md`](../pi-rpc/SKILL.md) |

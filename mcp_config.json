@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "pi-rpc": {
+      "command": "/bin/bash",
+      "args": ["${PLUGIN_ROOT}/scripts/pi-rpc-mcp.sh"],
+      "timeoutSeconds": 600,
+      "tools": {
+        "pi_run": { "eager": true },
+        "pi_wait": { "eager": true },
+        "pi_steer": { "eager": true },
+        "pi_abort": { "eager": true },
+        "pi_sessions": { "eager": true }
+      }
+    }
+  }
+}

@@ -2,9 +2,10 @@
 
 GBStack is a portable agy plugin. It combines on-demand Swarm Coordinator
 rules, the `subagent-first` coordination workflow, four specialized agent
-prompts (`scout`, `plan`, `worker`, `reviewer`), 8 on-demand playbooks, 11
-standalone engineering skills, and Schema v2 dynamic CLI role execution. Swarm
-coordination starts when you invoke `/swarm` or resume an active Swarm.
+prompts (`scout`, `plan`, `worker`, `reviewer`), 8 on-demand playbooks, 12
+standalone engineering skills, a built-in persistent `pi-rpc` MCP server, and
+Schema v2 dynamic `native` / `cli` / `mcp` role execution. Swarm coordination
+starts when you invoke `/swarm` or resume an active Swarm.
 
 ## Install and migrate
 
@@ -32,7 +33,7 @@ agy plugin install /path/to/gbstack
 ## Architecture (Schema v2)
 
 GBStack Schema v2 (`"schemaVersion": 2`, v1 is no longer supported) removes all
-CLI-specific hardcoding. Every role runs in either `"native"` or `"cli"` mode:
+CLI-specific hardcoding. Every role runs in `"native"`, `"cli"`, or `"mcp"` mode:
 
 - **`mode: "native"`**: Runs directly on a native host model (`native.model`).
 - **`mode: "cli"`**: Uses a thin Swarm outer driver (default
@@ -40,6 +41,11 @@ CLI-specific hardcoding. Every role runs in either `"native"` or `"cli"` mode:
   `concurrentWorkspace: "share"` for isolated concurrent writes) that invokes
   the unified deterministic runner `scripts/run-cli.sh`. Session-level readiness
   checks run through `scripts/preflight-cli.sh`.
+- **`mode: "mcp"`**: Calls the built-in persistent `gbstack_pi-rpc` MCP server
+  directly from the main Agent, Coordinator, or an MCP-inheriting subagent—with
+  zero outer-driver overhead, no CLI preflight (`requiresCliPreflight: false`),
+  and hot `pi --mode rpc` session reuse. (`swarm{action:"add"}` workers do not
+  inherit MCP tools, so the Coordinator invokes `mode: "mcp"` roles directly.)
 
 ### Role configuration and 3-layer merge
 
@@ -52,17 +58,18 @@ GBStack merges three layers in order of increasing priority:
 Relative `prompt` names resolve under `agents/` in those same layer
 directories (project -> user -> plugin root).
 
-**Project-layer `cli` security boundary:** By default, project-level
+**Project-layer `cli` / `mcp` security boundary:** By default, project-level
 `<repo>/.agents/gbstack/roles.json` is forbidden from defining or overriding any
-non-`null` `roles.*.cli` block (preventing untrusted repositories from
-injecting arbitrary shell commands); only the plugin default and user layers are
-trusted for `cli` definitions. Project overrides may still change `mode`
-(switching between default/user-defined `native` and `cli`), `native`, `prompt`,
-`reviews`, `slots`, or set `"cli": null`. To explicitly allow project-level
-`roles.*.cli`, pass `--allow-project-cli` to `resolve-roles.sh` /
-`preflight-cli.sh` / `run-cli.sh` or set `GBSTACK_ALLOW_PROJECT_CLI=1`.
-This opt-in also applies to project-level `roles.*.cli.rework` and
-`roles.*.cli.fallback` overrides.
+non-`null` `roles.*.cli` or `roles.*.mcp` block (preventing untrusted
+repositories from injecting arbitrary shell commands or overriding controlled
+tool settings); only the plugin default and user layers are trusted for `cli`
+and `mcp` definitions. Project overrides may still change `mode` (switching
+between default/user-defined `native`, `cli`, and `mcp`), `native`, `prompt`,
+`reviews`, `slots`, or set `"cli": null` / `"mcp": null`. To explicitly allow
+project-level `roles.*.cli` / `roles.*.mcp`, pass `--allow-project-cli` to
+`resolve-roles.sh` / `preflight-cli.sh` / `run-cli.sh` or set
+`GBSTACK_ALLOW_PROJECT_CLI=1`. This opt-in also applies to project-level
+`rework` and `fallback` overrides.
 
 **Built-in slots:**
 - Role slots (`ROLE_SLOTS`): `coordinator`, `recon`, `plan`, `implement`, `monitor`
@@ -96,6 +103,53 @@ scripts/resolve-roles.sh --cwd /path/to/repo cli-roles --format lines
 In single-agent mode, the host's `invoke_subagent` discovery is limited to the
 plugin's static `agents/*.md` files. Custom roles in `roles.json` are available
 to Swarm and other dispatch that uses `resolve-roles.sh`.
+
+## Persistent `pi-rpc` MCP Server (`gbstack_pi-rpc`)
+
+GBStack bundles a persistent `pi --mode rpc` MCP server in [`mcp_config.json`](mcp_config.json)
+backed by [`scripts/pi-rpc-mcp.sh`](scripts/pi-rpc-mcp.sh) and `scripts/mcp/*.mjs`.
+`scripts/pi-rpc-mcp.sh` automatically discovers `node` and `pi` across `PATH`,
+nvm, fnm, volta, Homebrew, and npm-global installations.
+
+- **5 `eager: true` tools** (registered directly without lazy schema reads):
+  `mcp_gbstack_pi-rpc_pi_run`, `mcp_gbstack_pi-rpc_pi_wait`,
+  `mcp_gbstack_pi-rpc_pi_steer`, `mcp_gbstack_pi-rpc_pi_abort`, and
+  `mcp_gbstack_pi-rpc_pi_sessions`.
+- **Zero outer-driver overhead & hot session cache**: Defaults to the model in
+  `~/.pi/agent/settings.json` with `thinking: "medium"`. Reusing `session_id`
+  keeps the `pi` process warm and hits prompt caches across follow-up turns.
+- **Safety guards**: Writable runs accept the 4-key `baseline` object
+  (`gitCleanHead`, `fileSha1`, `plannedNew`, `allowedPaths`) and allow at most
+  one writable session per `cwd` (use separate git worktrees for parallel
+  writes); read-only runs pass `readonly: true` to restrict `pi` to
+  `read,grep,find,ls`.
+- **Gate-M platform behavior**: Main Agent, Swarm Coordinator, and
+  MCP-inheriting `invoke_subagent` / `agy --agent` sessions can call
+  `mcp_gbstack_pi-rpc_*` directly. `swarm{action:"add"}` workers do **not**
+  inherit MCP tools, so `mode: "mcp"` roles are invoked directly by the
+  Coordinator without spawning an outer Swarm wrapper.
+
+### Switching `worker` to `mode: "mcp"`
+
+Add this snippet to `${GBSTACK_USER_CONFIG_DIR:-$HOME/.gemini/config/gbstack}/roles.json`:
+
+```json
+{
+  "schemaVersion": 2,
+  "roles": {
+    "worker": {
+      "mode": "mcp",
+      "mcp": {
+        "provider": "openai",
+        "server": "gbstack_pi-rpc",
+        "thinking": "medium",
+        "waitMs": 60000,
+        "fallbackToNativeOnTransientFailure": true
+      }
+    }
+  }
+}
+```
 
 ## Dynamic CLI configuration (`roles.*.cli`)
 
@@ -577,18 +631,28 @@ Swarm work to one of eight [on-demand playbooks](skills/subagent-first/playbooks
 Read the matching playbook before breaking down the work or writing briefs. If
 none applies, follow the standard `subagent-first` workflow.
 
-Eleven standalone engineering skills cover code tracing (`how`), design history
+Twelve standalone engineering skills cover code tracing (`how`), design history
 (`why`), system explanation (`teach`), architecture (`architect`), change
 impact (`blast-radius`), design critique (`interrogate`), editing (`unslop`),
 context recovery (`ketchup`), course correction (`correct`), requirements
-refinement (`sharpen`), and multi-provider iterative review (`council`). Use
-them on their own or reference them in Swarm briefs.
+refinement (`sharpen`), multi-provider iterative review (`council`), and
+persistent `pi --mode rpc` MCP driving (`pi-rpc`). Use them on their own or
+reference them in Swarm briefs.
+
+## Verification
+
+```sh
+agy plugin validate --strict /path/to/gbstack
+node --test tests/test_pi_rpc_mcp.mjs
+python3 -B -m unittest discover -s tests -v
+```
 
 ## Directory structure
 
 ```text
 gbstack/
 ├── .gitignore
+├── mcp_config.json
 ├── plugin.json
 ├── README.md
 ├── agents/
@@ -604,6 +668,12 @@ gbstack/
 │   ├── lib/
 │   │   ├── resolve_roles.py
 │   │   └── run_cli.py
+│   ├── mcp/
+│   │   ├── pi-rpc-server.mjs
+│   │   ├── protocol.mjs
+│   │   ├── session-pool.mjs
+│   │   └── workspace-guard.mjs
+│   ├── pi-rpc-mcp.sh
 │   ├── preflight-cli.sh
 │   ├── resolve-roles.sh
 │   └── run-cli.sh
@@ -621,6 +691,8 @@ gbstack/
 │   ├── interrogate/
 │   │   └── SKILL.md
 │   ├── ketchup/
+│   │   └── SKILL.md
+│   ├── pi-rpc/
 │   │   └── SKILL.md
 │   ├── sharpen/
 │   │   └── SKILL.md
@@ -643,6 +715,7 @@ gbstack/
 │       └── SKILL.md
 └── tests/
     ├── test_cli_runner.py
+    ├── test_pi_rpc_mcp.mjs
     └── test_resolve_roles.py
 ```
 

@@ -34,6 +34,22 @@ def custom_cli_role(
     }
 
 
+def custom_mcp_role(
+    *,
+    provider="anthropic",
+    **extra,
+):
+    cfg = {"provider": provider}
+    cfg.update(extra)
+    return {
+        "readonly": False,
+        "workspace": "inherit",
+        "prompt": None,
+        "mode": "mcp",
+        "mcp": cfg,
+    }
+
+
 class ResolveRolesTest(unittest.TestCase):
     def setUp(self):
         self.assertTrue(CLI.is_file(), "scripts/resolve-roles.sh has not been implemented")
@@ -972,6 +988,247 @@ class ResolveRolesTest(unittest.TestCase):
                             self.assertIsNone(cli[variant])
                         else:
                             self.assertEqual(cli[variant]["args"], ["--proj"])
+
+    def test_mcp_role_resolution_and_defaults(self):
+        self.config(self.user_config, {
+            "roles": {
+                "mcp-minimal": custom_mcp_role(provider="anthropic"),
+                "mcp-full": {
+                    "readonly": False,
+                    "workspace": "inherit",
+                    "prompt": None,
+                    "mode": "mcp",
+                    "native": {"provider": "google", "model": "gemini-4-hydrogen-high"},
+                    "mcp": {
+                        "provider": "openai",
+                        "server": "custom_pi_rpc",
+                        "model": "gpt-5.4",
+                        "thinking": "high",
+                        "waitMs": 30000,
+                        "outerModel": "gemini-3.8-flash-medium",
+                        "outerLowQuotaFallback": "gemini-3.8-flash-low",
+                        "fallbackToNativeOnTransientFailure": True,
+                        "rework": {"thinking": "max", "waitMs": 60000},
+                        "fallback": {"model": "gpt-5.3", "thinking": "medium"},
+                    },
+                },
+            },
+        })
+        options = ("--user-config-dir", self.user_dir)
+        minimal = self.success(*options, "role", "mcp-minimal")
+        self.assertEqual(minimal["mode"], "mcp")
+        self.assertEqual(minimal["effectiveProvider"], "anthropic")
+        self.assertFalse(minimal["requiresCliPreflight"])
+        self.assertEqual(minimal["mcp"], {
+            "provider": "anthropic",
+            "server": "gbstack_pi-rpc",
+            "thinking": None,
+            "waitMs": None,
+            "fallbackToNativeOnTransientFailure": False,
+            "rework": None,
+            "fallback": None,
+        })
+
+        full = self.success(*options, "role", "mcp-full")
+        self.assertEqual(full["effectiveProvider"], "openai")
+        self.assertFalse(full["requiresCliPreflight"])
+        self.assertEqual(full["mcp"]["server"], "custom_pi_rpc")
+        self.assertEqual(full["mcp"]["model"], "gpt-5.4")
+        self.assertEqual(full["mcp"]["thinking"], "high")
+        self.assertEqual(full["mcp"]["waitMs"], 30000)
+        self.assertTrue(full["mcp"]["fallbackToNativeOnTransientFailure"])
+        self.assertEqual(full["mcp"]["rework"]["thinking"], "max")
+        self.assertEqual(full["mcp"]["rework"]["waitMs"], 60000)
+        self.assertEqual(full["mcp"]["rework"]["server"], "custom_pi_rpc")
+        self.assertEqual(full["mcp"]["fallback"]["model"], "gpt-5.3")
+        self.assertEqual(full["mcp"]["fallback"]["thinking"], "medium")
+
+        cli_ids = [entry["id"] for entry in self.success(*options, "cli-roles")]
+        self.assertNotIn("mcp-minimal", cli_ids)
+        self.assertNotIn("mcp-full", cli_ids)
+
+    def test_mcp_validation_errors(self):
+        user_cases = [
+            (self.role("worker", mode="mcp", mcp=None), "$.roles.worker.mcp"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "unknown": True}), "$.roles.worker.mcp.unknown"),
+            (self.role("worker", mode="mcp", mcp={}), "$.roles.worker.mcp.provider"),
+            (self.role("worker", mode="mcp", mcp={"provider": ""}), "$.roles.worker.mcp.provider"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "server": ""}), "$.roles.worker.mcp.server"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "model": ""}), "$.roles.worker.mcp.model"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "thinking": "ultra"}), "$.roles.worker.mcp.thinking"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "waitMs": 0}), "$.roles.worker.mcp.waitMs"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "waitMs": -1}), "$.roles.worker.mcp.waitMs"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "waitMs": True}), "$.roles.worker.mcp.waitMs"),
+            (self.role("worker", mode="mcp", mcp={"provider": "openai", "outerModel": ""}), "$.roles.worker.mcp.outerModel"),
+            (
+                self.role("worker", mode="mcp", native=None, cli=None, mcp={
+                    "provider": "openai", "fallbackToNativeOnTransientFailure": True,
+                }),
+                "$.roles.worker.mcp.fallbackToNativeOnTransientFailure",
+            ),
+            (
+                self.role("worker", mode="mcp", mcp={
+                    "provider": "openai", "rework": {"unknown": 1},
+                }),
+                "$.roles.worker.mcp.rework.unknown",
+            ),
+            (
+                self.role("worker", mode="mcp", mcp={
+                    "provider": "openai", "rework": {"thinking": "invalid"},
+                }),
+                "$.roles.worker.mcp.rework.thinking",
+            ),
+            (
+                self.role("worker", mode="mcp", mcp={
+                    "provider": "openai", "fallback": {"waitMs": 0},
+                }),
+                "$.roles.worker.mcp.fallback.waitMs",
+            ),
+            (
+                self.role("worker", mode="mcp", mcp={
+                    "provider": "openai", "fallback": {"provider": None},
+                }),
+                "$.roles.worker.mcp.fallback.provider",
+            ),
+            (
+                self.role("worker", mode="mcp", mcp={
+                    "provider": "openai", "rework": {"fallbackToNativeOnTransientFailure": True},
+                }),
+                "$.roles.worker.mcp.rework.fallbackToNativeOnTransientFailure",
+            ),
+        ]
+        for config, path in user_cases:
+            with self.subTest(path=path, config=config):
+                self.invalid_user(config, path)
+
+    def test_mcp_review_distinct_provider_validation(self):
+        self.config(self.user_config, {
+            "roles": {
+                "reviewer-mcp": dict(custom_mcp_role(provider="deepseek"), readonly=True),
+            },
+            "reviews": {
+                "council": {
+                    "members": ["reviewer-mcp", "reviewer-gemini", "reviewer-claude"],
+                    "minDistinctProviders": 3,
+                    "requireDistinctProviders": True,
+                },
+            },
+        })
+        review = self.success("--user-config-dir", self.user_dir, "review", "council")
+        self.assertEqual(review["distinctProviders"], ["deepseek", "google", "anthropic"])
+        self.assertFalse(review["requiresCliPreflight"])
+        self.assertEqual(review["cliRoles"], [])
+
+        # Duplicate provider with reviewer-gemini ("google") fails distinct provider check
+        self.config(self.user_config, {
+            "roles": {
+                "reviewer-mcp": dict(custom_mcp_role(provider="google"), readonly=True),
+            },
+            "reviews": {
+                "council": {
+                    "members": ["reviewer-mcp", "reviewer-gemini", "reviewer-claude"],
+                    "minDistinctProviders": 3,
+                    "requireDistinctProviders": True,
+                },
+            },
+        })
+        self.failure(
+            self.invoke("--user-config-dir", self.user_dir, "validate"),
+            1, "user", self.user_config, "$.reviews.council.minDistinctProviders",
+        )
+
+    def test_review_mcp_rework_and_fallback_provider_validation(self):
+        for variant in ("rework", "fallback"):
+            for provider, allow, distinct, minimum, ok in [
+                ("deepseek", False, True, 2, True), ("other", False, True, 2, True),
+                ("google", False, True, 2, False), ("google", True, True, 2, variant == "fallback"),
+                ("google", False, False, 2, True),
+                ("google", True, True, 3, False), ("other", True, True, 3, True),
+            ]:
+                with self.subTest(variant=variant, provider=provider, allow=allow, distinct=distinct, minimum=minimum):
+                    self.config(self.user_config, {
+                        "roles": {
+                            "reviewer-mcp": dict(
+                                custom_mcp_role(provider="deepseek", **{variant: {"provider": provider}}),
+                                readonly=True,
+                            ),
+                        },
+                        "reviews": {"council": {
+                            "members": ["reviewer-mcp", "reviewer-gemini", "reviewer-claude"],
+                            "minDistinctProviders": minimum, "requireDistinctProviders": distinct,
+                            "allowSameProviderFallback": allow,
+                        }},
+                    })
+                    result = self.invoke("--user-config-dir", self.user_dir, "validate")
+                    if ok:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.failure(
+                            result, 1, self.user_config,
+                            f"$.roles.reviewer-mcp.mcp.{variant}.provider", "council",
+                        )
+
+        # Mixed CLI + MCP members whose variants collapse to the same provider are rejected
+        self.invalid_user({
+            "roles": {
+                "reviewer-mcp": dict(
+                    custom_mcp_role(provider="a", rework={"provider": "c"}),
+                    readonly=True,
+                ),
+                "reviewer-cli": dict(
+                    custom_cli_role(provider="b", fallback={"provider": "c"}),
+                    readonly=True,
+                ),
+            },
+            "reviews": {"custom": {
+                "members": ["reviewer-mcp", "reviewer-cli"],
+                "minDistinctProviders": 2,
+                "requireDistinctProviders": True,
+                "allowSameProviderFallback": False,
+            }},
+        }, "$.roles.reviewer-mcp.mcp.rework.provider", "custom")
+
+    def test_cross_layer_mcp_mode_flip_origin_attribution(self):
+        # Project layer flips scout to mode=mcp without mcp config -> blames project
+        self.invalid(self.role("scout", mode="mcp"), "$.roles.scout.mcp")
+        # User layer pre-configures mcp rework conflicting with reviewer-gemini (inactive while mode=cli);
+        # project layer flips mode=mcp -> blames project
+        self.config(self.user_config, self.role("reviewer-codex", mcp={
+            "provider": "deepseek",
+            "rework": {"provider": "google"},
+        }))
+        self.config(self.project_config, self.role("reviewer-codex", mode="mcp"))
+        result = self.invoke("--user-config-dir", self.user_dir, "--project-config-dir", self.project_dir, "validate")
+        self.failure(result, 1, "project", self.project_config, "$.roles.reviewer-codex.mcp.rework.provider", "council")
+
+    def test_project_mcp_security_boundary(self):
+        for bad in (
+            self.role("custom-mcp", **custom_mcp_role()),
+            self.role("worker", mcp={"provider": "openai"}),
+            self.role("worker", mcp={"rework": {"thinking": "high"}}),
+        ):
+            with self.subTest(bad=bad):
+                self.invalid(bad, "--allow-project-cli")
+
+        # Project layer MAY set mcp: null with mode: native
+        self.config(self.project_config, {
+            "roles": {"worker": {"mode": "native", "mcp": None}},
+        })
+        worker_native = self.success("--project-config-dir", self.project_dir, "role", "worker")
+        self.assertEqual(worker_native["mode"], "native")
+        self.assertIsNone(worker_native["mcp"])
+
+        # Project layer MAY define/override mcp when --allow-project-cli or GBSTACK_ALLOW_PROJECT_CLI=1 is set
+        self.config(self.project_config, {
+            "roles": {"mcp-worker": custom_mcp_role(provider="anthropic", thinking="medium")},
+        })
+        mcp_flag = self.success("--project-config-dir", self.project_dir, "--allow-project-cli", "role", "mcp-worker")
+        self.assertEqual(mcp_flag["mcp"]["thinking"], "medium")
+        mcp_env = self.success(
+            "--project-config-dir", self.project_dir, "role", "mcp-worker",
+            env=dict(self.env, GBSTACK_ALLOW_PROJECT_CLI="1"),
+        )
+        self.assertEqual(mcp_env["mcp"]["thinking"], "medium")
 
 
 if __name__ == "__main__":

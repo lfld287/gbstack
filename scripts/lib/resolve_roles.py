@@ -27,18 +27,26 @@ CLI_VARIANT_FIELDS = (
     "outerModel", "outerLowQuotaFallback",
 )
 CLI_PREFLIGHT_FIELDS = ("command", "outputContains", "env", "timeoutSeconds")
+MCP_DEFAULT_SERVER = "gbstack_pi-rpc"
+MCP_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+MCP_VARIANT_FIELDS = (
+    "provider", "server", "model", "thinking", "waitMs",
+    "outerModel", "outerLowQuotaFallback",
+)
 FIELDS = {
     (): ("schemaVersion", "roles", "reviews", "slots"),
     ("slots",): ROLE_SLOTS + REVIEW_SLOTS,
     ("roles", "*"): (
         "description", "prompt", "skill", "readonly", "workspace", "concurrentWorkspace",
-        "mode", "native", "cli",
+        "mode", "native", "cli", "mcp",
     ),
     ("roles", "*", "native"): ("provider", "model", "reworkModel", "lowQuotaFallback", "lowQuotaFallbackProvider"),
     ("roles", "*", "cli"): CLI_VARIANT_FIELDS + NATIVE_FALLBACK_FLAGS + CLI_VARIANTS,
     ("roles", "*", "cli", "preflight"): CLI_PREFLIGHT_FIELDS,
     **{("roles", "*", "cli", variant): CLI_VARIANT_FIELDS for variant in CLI_VARIANTS},
     **{("roles", "*", "cli", variant, "preflight"): CLI_PREFLIGHT_FIELDS for variant in CLI_VARIANTS},
+    ("roles", "*", "mcp"): MCP_VARIANT_FIELDS + ("fallbackToNativeOnTransientFailure",) + CLI_VARIANTS,
+    **{("roles", "*", "mcp", variant): MCP_VARIANT_FIELDS for variant in CLI_VARIANTS},
     ("reviews", "*"): (
         "description", "members", "requireDistinctProviders", "minDistinctProviders",
         "allowSameProviderFallback", "onMissingProvider", "onIncomplete", "maxRounds",
@@ -249,13 +257,13 @@ class Resolver:
                 and not self.allow_project_cli
                 and len(path) == 2
                 and path[0] == "roles"
-                and key == "cli"
+                and key in ("cli", "mcp")
                 and new is not None
             ):
                 raise ConfigError(
                     source,
                     field,
-                    "project config cannot define or override 'cli' without --allow-project-cli",
+                    f"project config cannot define or override '{key}' without --allow-project-cli",
                 )
             if path == ("roles",) and (not ROLE_ID.fullmatch(key) or key == "all" or key.startswith("coordinator-")):
                 raise ConfigError(source, field, "invalid or reserved role ID")
@@ -389,10 +397,11 @@ class Resolver:
         mode = self.expect(role, path, "mode", str)
         if mode == "codex":
             self.invalid(mode_field, "mode 'codex' was replaced by 'cli' in schemaVersion 2; migrate mode to 'cli'")
-        if mode not in ("native", "cli"):
-            self.invalid(mode_field, "expected 'native' or 'cli'")
+        if mode not in ("native", "cli", "mcp"):
+            self.invalid(mode_field, "expected 'native', 'cli', or 'mcp'")
         native = self.expect(role, path, "native", dict, optional=mode != "native", extra_origins=(mode_field,))
         cli_cfg = self.expect(role, path, "cli", dict, optional=mode != "cli", extra_origins=(mode_field,))
+        mcp_cfg = self.expect(role, path, "mcp", dict, optional=mode != "mcp", extra_origins=(mode_field,))
         resolved = dict(role)
         if native is not None:
             native_path = (*path, "native")
@@ -406,6 +415,8 @@ class Resolver:
                 resolved["native"]["reworkModel"] = model
         if cli_cfg is not None:
             resolved["cli"] = self.resolve_cli(role_id, cli_cfg, mode, native)
+        if mcp_cfg is not None:
+            resolved["mcp"] = self.resolve_mcp(role_id, mcp_cfg, mode, native)
         prompt = role.get("prompt", f"{role_id}.md")
         prompt_path, prompt_source = self.resolve_prompt(prompt, (*path, "prompt"))
         return dict(
@@ -509,6 +520,49 @@ class Resolver:
             timeoutSeconds=timeout_seconds, preflight=preflight,
         )
 
+    def resolve_mcp(self, role_id, mcp_cfg, mode, native):
+        path = ("roles", role_id, "mcp")
+        normalized = self._normalize_mcp_fields(mcp_cfg, path, mode)
+        flag_value = self.expect(mcp_cfg, path, "fallbackToNativeOnTransientFailure", bool, optional=True)
+        if flag_value and native is None:
+            field = (*path, "fallbackToNativeOnTransientFailure")
+            self.invalid(
+                field,
+                "requires a native configuration",
+                self.latest_source(field, ("roles", role_id, "native")),
+            )
+        normalized["fallbackToNativeOnTransientFailure"] = bool(flag_value)
+        for variant in CLI_VARIANTS:
+            override = self.expect(mcp_cfg, path, variant, dict, optional=True)
+            normalized[variant] = self._normalize_mcp_profile(normalized, override, (*path, variant), mode)
+        return normalized
+
+    def _normalize_mcp_profile(self, base, override, path, mode):
+        if override is None:
+            return None
+        profile = {key: base[key] for key in MCP_VARIANT_FIELDS if key in base}
+        profile.update(override)
+        if profile.get("server") is None:
+            profile["server"] = base["server"]
+        return self._normalize_mcp_fields(profile, path, mode)
+
+    def _normalize_mcp_fields(self, mcp_cfg, path, mode):
+        optional = mode != "mcp"
+        mode_origins = ((*path[:2], "mode"),) if not optional else ()
+        self.expect(mcp_cfg, path, "provider", str, optional=optional, extra_origins=mode_origins)
+        server = self.expect(mcp_cfg, path, "server", str, optional=True)
+        if server is None:
+            server = MCP_DEFAULT_SERVER
+        self.expect(mcp_cfg, path, "model", str, optional=True)
+        thinking = self.expect(mcp_cfg, path, "thinking", str, optional=True)
+        if thinking is not None and thinking not in MCP_THINKING_LEVELS:
+            levels = ", ".join(repr(level) for level in MCP_THINKING_LEVELS)
+            self.invalid((*path, "thinking"), f"expected one of {levels}")
+        wait_ms = self.expect_positive_int(mcp_cfg, path, "waitMs", default=None)
+        self.expect(mcp_cfg, path, "outerModel", str, optional=True)
+        self.expect(mcp_cfg, path, "outerLowQuotaFallback", str, optional=True)
+        return dict(mcp_cfg, server=server, thinking=thinking, waitMs=wait_ms)
+
     def resolve_review(self, review_id, review):
         path = ("reviews", review_id)
         if not isinstance(review, dict):
@@ -589,18 +643,20 @@ class Resolver:
         if distinct:
             member_options = {member: {provider} for member, provider in providers.items()}
             for member, role in member_roles.items():
-                if role["mode"] == "cli":
+                mode_key = role["mode"]
+                if mode_key in ("cli", "mcp"):
                     member_options[member].update(
-                        role["cli"][variant]["provider"]
+                        role[mode_key][variant]["provider"]
                         for variant in CLI_VARIANTS
-                        if role["cli"][variant] is not None
+                        if role[mode_key][variant] is not None
                     )
 
             for member, role in member_roles.items():
-                if role["mode"] != "cli":
+                mode_key = role["mode"]
+                if mode_key not in ("cli", "mcp"):
                     continue
                 for variant in CLI_VARIANTS:
-                    profile = role["cli"][variant]
+                    profile = role[mode_key][variant]
                     if profile is None:
                         continue
                     provider = profile["provider"]
@@ -617,26 +673,37 @@ class Resolver:
                         if name != member and provider not in options
                     }
                     if reuses or len(forced_other | {provider}) < minimum:
-                        field = ("roles", member, "cli", variant, "provider")
-                        conflict_fields = [field, *review_fields]
+                        field = ("roles", member, mode_key, variant, "provider")
+                        conflict_fields = [field, ("roles", member, "mode"), *review_fields]
                         if variant == "fallback":
                             conflict_fields.extend(fallback_fields)
                         for name in colliding_others or [name for name in member_roles if name != member]:
                             other_role = member_roles[name]
-                            if (
-                                other_role["mode"] == "cli"
-                                and other_role["cli"][variant] is not None
-                                and other_role["cli"][variant]["provider"] == provider
-                            ):
-                                conflict_fields.append(("roles", name, "cli", variant, "provider"))
+                            other_mode = other_role["mode"]
+                            conflict_fields.append(("roles", name, "mode"))
+                            if providers[name] == provider:
+                                conflict_fields.append(("roles", name, other_mode, "provider"))
                             else:
-                                conflict_fields.extend((
-                                    ("roles", name, "provider"),
-                                    ("roles", name, other_role["mode"], "provider"),
-                                ))
+                                matched_variant = (
+                                    next(
+                                        (
+                                            other_variant
+                                            for other_variant in CLI_VARIANTS
+                                            if other_role[other_mode][other_variant] is not None
+                                            and other_role[other_mode][other_variant]["provider"] == provider
+                                        ),
+                                        None,
+                                    )
+                                    if other_mode in ("cli", "mcp")
+                                    else None
+                                )
+                                if matched_variant is not None:
+                                    conflict_fields.append(("roles", name, other_mode, matched_variant, "provider"))
+                                else:
+                                    conflict_fields.append(("roles", name, other_mode, "provider"))
                         self.invalid(
                             field,
-                            f"roles.{member}.cli.{variant}.provider {provider!r} "
+                            f"roles.{member}.{mode_key}.{variant}.provider {provider!r} "
                             f"violates review policy {review_id!r} distinct provider requirements",
                             self.latest_source(*conflict_fields),
                         )
