@@ -37,3 +37,8 @@ description: >-
 - **写入任务必传 4 键 `baseline` + `allowedPaths`**：`baseline` 仅接受 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键。工具层在写前校验基线并在写后检查 `out_of_scope_files`，越界即拒绝/标记。
 - **只读任务必传 `readonly: true`**：将 `pi` 工具集限制为 `read,grep,find,ls`，并在返回前核验工作区未被篡改。
 - **同 `cwd` 仅允许 1 个可写会话**：禁止在同一 `cwd` 上并发运行多个可写 `pi` 会话；多路并行写入必须各自使用独立的 `git worktree` 作为 `cwd`。
+
+## 五、只读交叉审查与 Gemini 反过度防御裁决
+
+- **只读审查调用**：用 `mcp_gbstack_pi-rpc_pi_run` 执行交叉审查时必传 `readonly: true`（例如 `model: "openai-codex/gpt-6.2-astra"`、`thinking: "xhigh"`），并在提示词中明确要求**仅报告有真实运行时触发路径与实证支撑的问题**，禁报假想边界与纯防御性兜底建议。
+- **Gemini 反过度防御裁决**：收回 GPT 审查结果后，禁止原样照单派发返工。必须由 Gemini 主控（Coordinator，必要时结合 `reviewer-gemini`）逐条核验触发路径、实际风险收益与新增复杂度/维护成本，过滤并驳回无实证空值/兜底保护、过度包装或低 ROI 意见并记录理由，仅将经裁决值得做的阻塞项派发修复。
