@@ -3,8 +3,8 @@
 GBStack is a portable agy plugin. It combines on-demand Swarm Coordinator
 rules, the `subagent-first` coordination workflow, four specialized agent
 prompts (`scout`, `plan`, `worker`, `reviewer`), 8 on-demand playbooks, 12
-standalone engineering skills, a built-in persistent `pi-rpc` MCP server, and
-Schema v2 dynamic `native` / `cli` / `mcp` role execution. Swarm coordination
+standalone engineering skills, a built-in persistent `pi-rpc` daemon and CLI,
+and Schema v2 dynamic `native` / `cli` role execution. Swarm coordination
 starts when you invoke `/swarm` or resume an active Swarm.
 
 ## Install and migrate
@@ -33,7 +33,7 @@ agy plugin install /path/to/gbstack
 ## Architecture (Schema v2)
 
 GBStack Schema v2 (`"schemaVersion": 2`, v1 is no longer supported) removes all
-CLI-specific hardcoding. Every role runs in `"native"`, `"cli"`, or `"mcp"` mode:
+CLI-specific hardcoding. Every role runs in `"native"` or `"cli"` mode:
 
 - **`mode: "native"`**: Runs directly on a native host model (`native.model`).
 - **`mode: "cli"`**: Uses a thin Swarm outer driver (default
@@ -41,11 +41,6 @@ CLI-specific hardcoding. Every role runs in `"native"`, `"cli"`, or `"mcp"` mode
   `concurrentWorkspace: "share"` for isolated concurrent writes) that invokes
   the unified deterministic runner `scripts/run-cli.sh`. Session-level readiness
   checks run through `scripts/preflight-cli.sh`.
-- **`mode: "mcp"`**: Calls the built-in persistent `gbstack_pi-rpc` MCP server
-  directly from the main Agent, Coordinator, or an MCP-inheriting subagent—with
-  zero outer-driver overhead, no CLI preflight (`requiresCliPreflight: false`),
-  and hot `pi --mode rpc` session reuse. (`swarm{action:"add"}` workers do not
-  inherit MCP tools, so the Coordinator invokes `mode: "mcp"` roles directly.)
 
 ### Role configuration and 3-layer merge
 
@@ -58,17 +53,16 @@ GBStack merges three layers in order of increasing priority:
 Relative `prompt` names resolve under `agents/` in those same layer
 directories (project -> user -> plugin root).
 
-**Project-layer `cli` / `mcp` security boundary:** By default, project-level
+**Project-layer `cli` security boundary:** By default, project-level
 `<repo>/.agents/gbstack/roles.json` is forbidden from defining or overriding any
-non-`null` `roles.*.cli` or `roles.*.mcp` block (preventing untrusted
-repositories from injecting arbitrary shell commands or overriding controlled
-tool settings); only the plugin default and user layers are trusted for `cli`
-and `mcp` definitions. Project overrides may still change `mode` (switching
-between default/user-defined `native`, `cli`, and `mcp`), `native`, `prompt`,
-`reviews`, `slots`, or set `"cli": null` / `"mcp": null`. To explicitly allow
-project-level `roles.*.cli` / `roles.*.mcp`, pass `--allow-project-cli` to
-`resolve-roles.sh` / `preflight-cli.sh` / `run-cli.sh` or set
-`GBSTACK_ALLOW_PROJECT_CLI=1`. This opt-in also applies to project-level
+non-`null` `roles.*.cli` block (preventing untrusted repositories from
+injecting arbitrary shell commands or overriding controlled tool settings); only
+the plugin default and user layers are trusted for `cli` definitions. Project
+overrides may still change `mode` (switching between default/user-defined
+`native` and `cli`), `native`, `prompt`, `reviews`, `slots`, or set
+`"cli": null`. To explicitly allow project-level `roles.*.cli`, pass
+`--allow-project-cli` to `resolve-roles.sh` / `preflight-cli.sh` / `run-cli.sh`
+or set `GBSTACK_ALLOW_PROJECT_CLI=1`. This opt-in also applies to project-level
 `rework` and `fallback` overrides.
 
 **Built-in slots:**
@@ -104,32 +98,39 @@ In single-agent mode, the host's `invoke_subagent` discovery is limited to the
 plugin's static `agents/*.md` files. Custom roles in `roles.json` are available
 to Swarm and other dispatch that uses `resolve-roles.sh`.
 
-## Persistent `pi-rpc` MCP Server (`gbstack_pi-rpc`)
+## Persistent `pi-rpc` Daemon & CLI (`scripts/pi-rpc-ctl.sh`)
 
-GBStack bundles a persistent `pi --mode rpc` MCP server in [`mcp_config.json`](mcp_config.json)
-backed by [`scripts/pi-rpc-mcp.sh`](scripts/pi-rpc-mcp.sh) and `scripts/mcp/*.mjs`.
-`scripts/pi-rpc-mcp.sh` automatically discovers `node` and `pi` across `PATH`,
-nvm, fnm, volta, Homebrew, and npm-global installations.
+GBStack bundles a local persistent `pi --mode rpc` UDS daemon
+([`scripts/rpc/pi-rpc-daemon.mjs`](scripts/rpc/pi-rpc-daemon.mjs)) and a
+lightweight CLI client ([`scripts/rpc/pi-rpc-ctl.mjs`](scripts/rpc/pi-rpc-ctl.mjs))
+wrapped by [`scripts/pi-rpc-ctl.sh`](scripts/pi-rpc-ctl.sh). `pi-rpc-ctl.sh`
+automatically discovers `node` (>= 18) and `pi` across `PATH`, nvm, fnm, volta,
+Homebrew, and npm-global installations.
 
-- **5 `eager: true` tools** (registered directly without lazy schema reads):
-  `mcp_gbstack_pi-rpc_pi_run`, `mcp_gbstack_pi-rpc_pi_wait`,
-  `mcp_gbstack_pi-rpc_pi_steer`, `mcp_gbstack_pi-rpc_pi_abort`, and
-  `mcp_gbstack_pi-rpc_pi_sessions`.
-- **Zero outer-driver overhead & hot session cache**: Defaults to the model in
-  `~/.pi/agent/settings.json` with `thinking: "medium"`. Reusing `session_id`
-  keeps the `pi` process warm and hits prompt caches across follow-up turns.
-- **Safety guards**: Writable runs accept the 4-key `baseline` object
+- **Standard `mode: "cli"` integration**: Configure roles with
+  `"binary": "{pluginRoot}/scripts/pi-rpc-ctl.sh"` and run via
+  `scripts/run-cli.sh` (with `WaitMsBeforeAsync: 500` in Swarm drivers). `run`
+  lazily starts the daemon using an atomic lock directory, blocks until
+  `agent_settled`, prints the reply text to `stdout`, and emits
+  `[pi-rpc] session_id=<id> status=<status> duration_ms=<ms> tools=<n>` on
+  `stderr`.
+- **Hot session reuse & safe idle recycling**: Pass `--session-id <ID>` (via
+  `sessionArgs`) on rework rounds to reuse the warm `pi` process and hit prompt
+  caches. Omit `--session-id` (or pass `--new-session` via `newSessionArgs`)
+  for a new independent task—if an idle writable session already exists for that
+  `cwd` with the same model, the daemon resets it with `new_session` and
+  rotates its `session_id` so contexts never leak across tasks.
+- **Disconnect/timeout auto-abort & 30m idle exit**: Disconnecting the client
+  socket or sending `SIGTERM`/`SIGINT` aborts the active `pi` run immediately
+  (no orphaned writes). Unused sessions and the idle daemon exit cleanly after
+  30 minutes (`GBSTACK_PI_IDLE_TTL_MS`, `GBSTACK_PI_DAEMON_IDLE_TTL_MS`).
+- **Safety guards**: Writable runs enforce the 4-key `baseline`
   (`gitCleanHead`, `fileSha1`, `plannedNew`, `allowedPaths`) and allow at most
-  one writable session per `cwd` (use separate git worktrees for parallel
-  writes); read-only runs pass `readonly: true` to restrict `pi` to
+  one active writable session per `cwd` (use separate git worktrees for
+  parallel writes); read-only runs pass `--readonly` to restrict `pi` to
   `read,grep,find,ls`.
-- **Gate-M platform behavior**: Main Agent, Swarm Coordinator, and
-  MCP-inheriting `invoke_subagent` / `agy --agent` sessions can call
-  `mcp_gbstack_pi-rpc_*` directly. `swarm{action:"add"}` workers do **not**
-  inherit MCP tools, so `mode: "mcp"` roles are invoked directly by the
-  Coordinator without spawning an outer Swarm wrapper.
 
-### Switching `worker` to `mode: "mcp"`
+### Using `pi-rpc-ctl.sh` for `worker` and `reviewer-pi`
 
 Add this snippet to `${GBSTACK_USER_CONFIG_DIR:-$HOME/.gemini/config/gbstack}/roles.json`:
 
@@ -138,13 +139,63 @@ Add this snippet to `${GBSTACK_USER_CONFIG_DIR:-$HOME/.gemini/config/gbstack}/ro
   "schemaVersion": 2,
   "roles": {
     "worker": {
-      "mode": "mcp",
-      "mcp": {
+      "mode": "cli",
+      "cli": {
         "provider": "openai",
-        "server": "gbstack_pi-rpc",
-        "thinking": "medium",
-        "waitMs": 60000,
-        "fallbackToNativeOnTransientFailure": true
+        "binary": "{pluginRoot}/scripts/pi-rpc-ctl.sh",
+        "fallbackBinaries": [],
+        "args": ["run", "--cwd", "{workdir}", "--thinking", "medium"],
+        "nonGitArgs": [],
+        "extraDirArgs": [],
+        "sessionArgs": ["--session-id", "{session_id}"],
+        "newSessionArgs": ["--new-session"],
+        "promptInput": "stdin",
+        "stdinArg": null,
+        "preflight": {
+          "command": ["{binary}", "preflight"],
+          "outputContains": "Preflight OK",
+          "timeoutSeconds": 15
+        },
+        "outerModel": "gemini-3.8-flash-medium",
+        "outerLowQuotaFallback": "claude-sonnet-5-5-high",
+        "fallbackToNativeOnPreflightFail": true,
+        "fallbackToNativeOnTransientFailure": true,
+        "rework": {
+          "args": ["run", "--cwd", "{workdir}", "--thinking", "high"]
+        }
+      }
+    },
+    "reviewer-pi": {
+      "prompt": "reviewer.md",
+      "readonly": true,
+      "workspace": "inherit",
+      "mode": "cli",
+      "cli": {
+        "provider": "openai",
+        "binary": "{pluginRoot}/scripts/pi-rpc-ctl.sh",
+        "fallbackBinaries": [],
+        "args": [
+          "run",
+          "--cwd", "{workdir}",
+          "--readonly",
+          "--model", "openai-codex/gpt-6.2-astra",
+          "--thinking", "high"
+        ],
+        "nonGitArgs": [],
+        "extraDirArgs": [],
+        "sessionArgs": ["--session-id", "{session_id}"],
+        "newSessionArgs": ["--new-session"],
+        "promptInput": "stdin",
+        "stdinArg": null,
+        "preflight": {
+          "command": ["{binary}", "preflight"],
+          "outputContains": "Preflight OK",
+          "timeoutSeconds": 15
+        },
+        "outerModel": "gemini-3.8-flash-medium",
+        "outerLowQuotaFallback": "claude-sonnet-5-5-high",
+        "fallbackToNativeOnPreflightFail": false,
+        "fallbackToNativeOnTransientFailure": false
       }
     }
   }
@@ -158,11 +209,13 @@ A role with `"mode": "cli"` defines its behavior under `roles.<id>.cli`:
 | Field | Description |
 |---|---|
 | `provider` | Underlying model provider identifier (e.g., `"openai"`, `"anthropic"`, `"google"`) — must name the model provider rather than the CLI tool name, as it is used for heterogeneous review provider counting |
-| `binary` | Primary executable name or path |
+| `binary` | Primary executable name or path; supports `{pluginRoot}` placeholder |
 | `fallbackBinaries` | Ordered fallback executable paths checked if `binary` is not on `PATH` |
-| `args` | Base CLI arguments; supports `{workdir}` and `{binary}` placeholders |
+| `args` | Base CLI arguments; supports `{workdir}`, `{binary}`, and `{pluginRoot}` placeholders |
 | `nonGitArgs` | Extra arguments appended automatically when `--cwd` is outside a Git worktree |
 | `extraDirArgs` | Argument template per `--add-dir`; supports `{dir}` placeholder |
+| `sessionArgs` | Optional argument template appended when `run-cli.sh --session-id <ID>` is passed; supports `{session_id}` placeholder |
+| `newSessionArgs` | Optional arguments appended when `run-cli.sh --new-session` is passed |
 | `promptInput` | `"stdin"` or `"arg"` |
 | `stdinArg` | Optional flag/token appended when `promptInput` is `"stdin"` (e.g., `"-"`) |
 | `promptPrefixArgs` | Arguments placed immediately before the prompt argument when `promptInput` is `"arg"` |
@@ -183,22 +236,25 @@ also uses the base CLI when rework is requested. A missing or `null`
 `cli.fallback` means there is no CLI-level fallback.
 
 `rework` and `fallback` accept only `provider`, `binary`, `fallbackBinaries`,
-`args`, `nonGitArgs`, `extraDirArgs`, `promptInput`, `stdinArg`,
-`promptPrefixArgs`, `env`, `timeoutSeconds`, `preflight`, `outerModel`, and
-`outerLowQuotaFallback`. `fallbackToNativeOnPreflightFail` and
-`fallbackToNativeOnTransientFailure` belong on the base `cli` only.
+`args`, `nonGitArgs`, `extraDirArgs`, `sessionArgs`, `newSessionArgs`,
+`promptInput`, `stdinArg`, `promptPrefixArgs`, `env`, `timeoutSeconds`,
+`preflight`, `outerModel`, and `outerLowQuotaFallback`.
+`fallbackToNativeOnPreflightFail` and `fallbackToNativeOnTransientFailure`
+belong on the base `cli` only.
 
 - **Same binary** (omitted `binary` or the same value as the base): omitted
   fields inherit from the base. An explicit list replaces the entire list
-  (`args`, `fallbackBinaries`, `nonGitArgs`, `extraDirArgs`, `promptPrefixArgs`);
-  `null` clears it to `[]`. An `env` object merges into the base environment,
-  with overrides winning; `env: null` clears the configured map to `{}`.
-  A `preflight` object replaces the entire check; `preflight: null` clears it.
+  (`args`, `fallbackBinaries`, `nonGitArgs`, `extraDirArgs`, `sessionArgs`,
+  `newSessionArgs`, `promptPrefixArgs`); `null` clears it to `[]`. An `env`
+  object merges into the base environment, with overrides winning; `env: null`
+  clears the configured map to `{}`. A `preflight` object replaces the entire
+  check; `preflight: null` clears it.
 - **Different binary:** start with empty `fallbackBinaries`, `args`,
-  `nonGitArgs`, `extraDirArgs`, `promptPrefixArgs`, and `env`, and no
-  `stdinArg` or `preflight`. Only `provider`, `promptInput`, `timeoutSeconds`,
-  `outerModel`, and `outerLowQuotaFallback` inherit. Set `provider` explicitly
-  if the new command uses a different model provider.
+  `nonGitArgs`, `extraDirArgs`, `sessionArgs`, `newSessionArgs`,
+  `promptPrefixArgs`, and `env`, and no `stdinArg` or `preflight`. Only
+  `provider`, `promptInput`, `timeoutSeconds`, `outerModel`, and
+  `outerLowQuotaFallback` inherit. Set `provider` explicitly if the new command
+  uses a different model provider.
 - In either case, `stdinArg: null` and `outerLowQuotaFallback: null` clear
   those fields; `timeoutSeconds: null` inherits the base timeout. When
   `promptInput` changes to `arg`, an omitted `stdinArg` is cleared. When it
@@ -284,6 +340,7 @@ scripts/run-cli.sh \
   --role '<ROLE_ID>' \
   --cwd '<WORKDIR>' \
   [--profile {default,rework,fallback}] \
+  [--session-id '<ID>' | --new-session] \
   [--add-dir '<DIR>' ...] \
   [--timeout <SEC>] \
   [--baseline-json '<JSON>']
@@ -636,14 +693,14 @@ Twelve standalone engineering skills cover code tracing (`how`), design history
 impact (`blast-radius`), design critique (`interrogate`), editing (`unslop`),
 context recovery (`ketchup`), course correction (`correct`), requirements
 refinement (`sharpen`), multi-provider iterative review (`council`), and
-persistent `pi --mode rpc` MCP driving (`pi-rpc`). Use them on their own or
+persistent `pi --mode rpc` daemon and CLI driving (`pi-rpc`). Use them on their own or
 reference them in Swarm briefs.
 
 ## Verification
 
 ```sh
 agy plugin validate --strict /path/to/gbstack
-node --test tests/test_pi_rpc_mcp.mjs
+node --test tests/test_pi_rpc_daemon.mjs
 python3 -B -m unittest discover -s tests -v
 ```
 
@@ -652,7 +709,6 @@ python3 -B -m unittest discover -s tests -v
 ```text
 gbstack/
 ├── .gitignore
-├── mcp_config.json
 ├── plugin.json
 ├── README.md
 ├── agents/
@@ -668,12 +724,13 @@ gbstack/
 │   ├── lib/
 │   │   ├── resolve_roles.py
 │   │   └── run_cli.py
-│   ├── mcp/
-│   │   ├── pi-rpc-server.mjs
+│   ├── rpc/
+│   │   ├── pi-rpc-ctl.mjs
+│   │   ├── pi-rpc-daemon.mjs
 │   │   ├── protocol.mjs
 │   │   ├── session-pool.mjs
 │   │   └── workspace-guard.mjs
-│   ├── pi-rpc-mcp.sh
+│   ├── pi-rpc-ctl.sh
 │   ├── preflight-cli.sh
 │   ├── resolve-roles.sh
 │   └── run-cli.sh
@@ -715,7 +772,7 @@ gbstack/
 │       └── SKILL.md
 └── tests/
     ├── test_cli_runner.py
-    ├── test_pi_rpc_mcp.mjs
+    ├── test_pi_rpc_daemon.mjs
     └── test_resolve_roles.py
 ```
 

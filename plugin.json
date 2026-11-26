@@ -2,7 +2,7 @@
   "name": "gbstack",
   "version": "1.1.0",
   "displayName": "GBStack",
-  "description": "On-demand Swarm Coordinator rules, the subagent-first workflow with 8 on-demand playbooks, 12 standalone engineering skills, four specialized roles (scout, plan, worker, reviewer), a built-in persistent pi-rpc MCP server, and Schema v2 native/cli/mcp role configuration with unified preflight and runner scripts.",
+  "description": "On-demand Swarm Coordinator rules, the subagent-first workflow with 8 on-demand playbooks, 12 standalone engineering skills, four specialized roles (scout, plan, worker, reviewer), a built-in persistent pi-rpc daemon and CLI, and Schema v2 native/cli role configuration with unified preflight and runner scripts.",
   "homepage": "https://github.com/lfld287/gbstack",
   "repository": "https://github.com/lfld287/gbstack"
 }

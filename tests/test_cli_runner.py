@@ -926,6 +926,156 @@ class CliRunnerTest(unittest.TestCase):
                 break
         self.assertFalse(alive, f"orphan preflight grandchild {grandchild_pid} still alive")
 
+    def test_plugin_root_placeholder_in_binary_and_preflight(self):
+        self.write_user_config({
+            "roles": {
+                "plugin-role": {
+                    "readonly": False,
+                    "workspace": "inherit",
+                    "prompt": None,
+                    "mode": "cli",
+                    "cli": {
+                        "provider": "openai",
+                        "binary": "{pluginRoot}/scripts/resolve-roles.sh",
+                        "args": ["--cwd", "{workdir}", "validate"],
+                        "promptInput": "stdin",
+                        "outerModel": "gemini-3.8-flash-medium",
+                        "preflight": {
+                            "command": ["{pluginRoot}/scripts/resolve-roles.sh", "--cwd", "{workdir}", "validate"],
+                            "outputContains": '"ok":true',
+                        },
+                    },
+                },
+            },
+        })
+        pf = self.run_preflight("--role", "plugin-role")
+        self.assertEqual(pf.returncode, 0, (pf.stdout, pf.stderr))
+        self.assertIn(str(ROOT / "scripts" / "resolve-roles.sh"), pf.stdout)
+
+        # Also verify {pluginRoot} expansion in run_cli args and binary
+        argv_log = self.base / "plugin_root_argv.json"
+        self.make_executable(
+            self.bin / "stubcli",
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['ARGV_LOG'], 'w') as f:\n"
+            "    json.dump(sys.argv[1:], f)\n"
+            "print('ok')\n",
+        )
+        self.write_user_config({
+            "roles": {
+                "plugin-arg-role": {
+                    "readonly": False,
+                    "workspace": "inherit",
+                    "prompt": None,
+                    "mode": "cli",
+                    "cli": {
+                        "provider": "openai",
+                        "binary": "stubcli",
+                        "args": ["--root", "{pluginRoot}", "--cwd", "{workdir}"],
+                        "promptInput": "stdin",
+                        "outerModel": "gemini-3.8-flash-medium",
+                    },
+                },
+            },
+        })
+        res = self.run_runner(
+            "--role", "plugin-arg-role", "--cwd", self.workdir,
+            stdin_text="task", env=dict(self.env, ARGV_LOG=str(argv_log)),
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(json.loads(argv_log.read_text()), ["--root", str(ROOT), "--cwd", str(self.workdir)])
+
+    def test_session_id_and_new_session_args_expansion_and_missing_template_exit_2(self):
+        argv_log = self.base / "session_argv.json"
+        self.make_executable(
+            self.bin / "stubcli",
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['ARGV_LOG'], 'w') as f:\n"
+            "    json.dump(sys.argv[1:], f)\n"
+            "print('ok')\n",
+        )
+        self.write_user_config({
+            "roles": {
+                "session-role": {
+                    "readonly": False,
+                    "workspace": "inherit",
+                    "prompt": None,
+                    "mode": "cli",
+                    "cli": {
+                        "provider": "openai",
+                        "binary": "stubcli",
+                        "args": ["--cwd", "{workdir}"],
+                        "sessionArgs": ["--session-id", "{session_id}"],
+                        "newSessionArgs": ["--new-session"],
+                        "promptInput": "stdin",
+                        "outerModel": "gemini-3.8-flash-medium",
+                    },
+                },
+                "plain-role": {
+                    "readonly": False,
+                    "workspace": "inherit",
+                    "prompt": None,
+                    "mode": "cli",
+                    "cli": {
+                        "provider": "openai",
+                        "binary": "stubcli",
+                        "args": ["--cwd", "{workdir}"],
+                        "promptInput": "stdin",
+                        "outerModel": "gemini-3.8-flash-medium",
+                    },
+                },
+            },
+        })
+        env = dict(self.env, ARGV_LOG=str(argv_log))
+
+        res_sid = self.run_runner(
+            "--role", "session-role", "--cwd", self.workdir, "--session-id", "sess-123",
+            stdin_text="task", env=env,
+        )
+        self.assertEqual(res_sid.returncode, 0, res_sid.stderr)
+        self.assertEqual(json.loads(argv_log.read_text()), ["--cwd", str(self.workdir), "--session-id", "sess-123"])
+
+        res_new = self.run_runner(
+            "--role", "session-role", "--cwd", self.workdir, "--new-session",
+            stdin_text="task", env=env,
+        )
+        self.assertEqual(res_new.returncode, 0, res_new.stderr)
+        self.assertEqual(json.loads(argv_log.read_text()), ["--cwd", str(self.workdir), "--new-session"])
+
+        res_both = self.run_runner(
+            "--role", "session-role", "--cwd", self.workdir, "--session-id", "sess-456", "--new-session",
+            stdin_text="task", env=env,
+        )
+        self.assertEqual(res_both.returncode, 0, res_both.stderr)
+        self.assertEqual(
+            json.loads(argv_log.read_text()),
+            ["--cwd", str(self.workdir), "--session-id", "sess-456", "--new-session"],
+        )
+
+        # Unconfigured sessionArgs / newSessionArgs -> exit 2
+        bad_sid = self.run_runner(
+            "--role", "plain-role", "--cwd", self.workdir, "--session-id", "sess-123",
+            stdin_text="task", env=env,
+        )
+        self.assertEqual(bad_sid.returncode, 2)
+        self.assertIn("sessionArgs", bad_sid.stderr)
+
+        empty_sid = self.run_runner(
+            "--role", "session-role", "--cwd", self.workdir, "--session-id", "",
+            stdin_text="task", env=env,
+        )
+        self.assertEqual(empty_sid.returncode, 2)
+        self.assertIn("--session-id", empty_sid.stderr)
+
+        bad_new = self.run_runner(
+            "--role", "plain-role", "--cwd", self.workdir, "--new-session",
+            stdin_text="task", env=env,
+        )
+        self.assertEqual(bad_new.returncode, 2)
+        self.assertIn("newSessionArgs", bad_new.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,7 +73,9 @@ export function resolvePiBinary() {
     if (isExecutableFile(process.env.GBSTACK_PI_BIN)) {
       return process.env.GBSTACK_PI_BIN;
     }
-    throw new Error(`GBSTACK_PI_BIN is not an executable file: ${process.env.GBSTACK_PI_BIN}`);
+    const err = new Error(`GBSTACK_PI_BIN is not an executable file: ${process.env.GBSTACK_PI_BIN}`);
+    err.code = 'ENOENT_PI';
+    throw err;
   }
 
   for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
@@ -99,7 +101,11 @@ export function resolvePiBinary() {
     if (candidate && isExecutableFile(candidate)) return candidate;
   }
 
-  throw new Error('pi executable not found (checked GBSTACK_PI_BIN, PATH, node sibling, nvm/volta/fnm/homebrew/local)');
+  const err = new Error(
+    'pi executable not found (checked GBSTACK_PI_BIN, PATH, node sibling, nvm/volta/fnm/homebrew/local)'
+  );
+  err.code = 'ENOENT_PI';
+  throw err;
 }
 
 function extractTextFromMessage(message) {
@@ -379,7 +385,7 @@ export class PiSession {
     for (const w of waiters) w();
   }
 
-  async startPrompt(prompt, waitMs, allowedPaths, thinking) {
+  async startPrompt(prompt, waitMs, allowedPaths, thinking, { signal } = {}) {
     if (this.state !== 'idle') {
       throw new Error(`Session ${this.id} is ${this.state}; cannot start prompt`);
     }
@@ -439,25 +445,50 @@ export class PiSession {
       this.#settleRun(run, false);
     }
 
-    return this.waitForRun(waitMs);
+    return this.waitForRun(waitMs, { signal });
   }
 
-  async waitForRun(waitMs = 60000) {
+  async waitForRun(waitMs = 60000, { signal } = {}) {
     const run = this.activeRun;
     if (!run) {
       throw new Error(`Session ${this.id} has no active or completed run`);
     }
-    if (!run.settled && waitMs > 0) {
+    const shouldWait = !run.settled && (waitMs === null || waitMs > 0) && !signal?.aborted;
+    if (shouldWait) {
       await new Promise((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          resolve();
+        let timer = null;
+        const cleanup = () => {
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          if (signal) {
+            signal.removeEventListener('abort', onAbort);
+          }
         };
-        const timer = setTimeout(() => {
+        const removeWaiter = () => {
           const idx = run.waiters.indexOf(done);
           if (idx !== -1) run.waiters.splice(idx, 1);
+        };
+        const done = () => {
+          cleanup();
           resolve();
-        }, waitMs);
+        };
+        const onAbort = () => {
+          removeWaiter();
+          cleanup();
+          resolve();
+        };
+        if (waitMs !== null) {
+          timer = setTimeout(() => {
+            removeWaiter();
+            cleanup();
+            resolve();
+          }, waitMs);
+        }
+        if (signal) {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
         run.waiters.push(done);
       });
     }
@@ -476,7 +507,7 @@ export class PiSession {
     };
   }
 
-  async abort(waitMs = 10000) {
+  async abort(waitMs = 10000, { signal } = {}) {
     if (this.state === 'idle') {
       return { session_id: this.id, status: 'idle' };
     }
@@ -484,14 +515,14 @@ export class PiSession {
       throw new Error(`Session ${this.id} cannot abort in state ${this.state}`);
     }
     this.state = 'aborting';
-    const abortTimeoutMs = waitMs > 0 ? waitMs : COMMAND_TIMEOUT_MS;
+    const abortTimeoutMs = waitMs !== null && waitMs > 0 ? waitMs : COMMAND_TIMEOUT_MS;
     try {
       await this.sendCommand({ type: 'clear_queue' }, Math.min(COMMAND_TIMEOUT_MS, abortTimeoutMs));
     } catch {
       // Proceed to abort even if clear_queue fails
     }
     await this.sendCommand({ type: 'abort' }, abortTimeoutMs);
-    return this.waitForRun(waitMs);
+    return this.waitForRun(waitMs, { signal });
   }
 
   async reset() {
@@ -570,7 +601,7 @@ export class SessionPool {
 
   log(msg, data) {
     const line = `[${new Date().toISOString()}] ${msg}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    const logPath = process.env.GBSTACK_PI_MCP_LOG;
+    const logPath = process.env.GBSTACK_PI_DAEMON_LOG || process.env.GBSTACK_PI_MCP_LOG;
     if (logPath) {
       try {
         appendFileSync(logPath, line);
@@ -634,7 +665,19 @@ export class SessionPool {
     return sess;
   }
 
-  async run({ cwd, prompt, session_id, thinking, readonly = false, model, wait_ms = 60000, baseline }) {
+  async run({
+    cwd,
+    prompt,
+    session_id,
+    new_session = false,
+    thinking,
+    readonly = false,
+    model,
+    wait_ms = 60000,
+    baseline,
+    signal,
+    onSession,
+  }) {
     const workdir = resolveWorkdir(cwd);
     const { inGit, toplevel } = detectGitWorktree(workdir);
     const allowedPaths = verifyBaseline(baseline, workdir, inGit);
@@ -651,13 +694,61 @@ export class SessionPool {
       if (model !== undefined && sess.model !== model) {
         throw new Error(`Session ${session_id} model conflict: expected ${sess.model}, got ${model}`);
       }
-      return sess.startPrompt(prompt, wait_ms, allowedPaths, thinking);
+      onSession?.(sess);
+      if (new_session) {
+        await sess.reset();
+      }
+      if (signal?.aborted) {
+        throw new Error('Run aborted before prompt start');
+      }
+      return sess.startPrompt(prompt, wait_ms, allowedPaths, thinking, { signal });
     }
 
     if (!readonly && this.writableCwdOwners.has(workdir)) {
       const ownerId = this.writableCwdOwners.get(workdir);
-      throw new Error(`Workspace ${workdir} already has an active writable session (${ownerId})`);
+      const existing = this.sessions.get(ownerId);
+      if (!existing) {
+        throw new Error(`Workspace ${workdir} already has an active writable session (${ownerId})`);
+      }
+      if (existing.state === 'closed' || existing.state === 'crashed') {
+        this.writableCwdOwners.delete(workdir);
+      } else {
+        if (existing.state !== 'idle') {
+          throw new Error(`Workspace ${workdir} already has an active writable session (${ownerId})`);
+        }
+        if (existing.model === requestedModel) {
+          existing.state = 'busy';
+          try {
+            await existing.sendCommand({ type: 'new_session' });
+          } catch (err) {
+            if (existing.state === 'busy') existing.state = 'idle';
+            throw err;
+          }
+          if (existing.state !== 'busy') {
+            throw new Error(`Session ${ownerId} is ${existing.state}; cannot recycle`);
+          }
+          const newId = `pi-${randomUUID().slice(0, 8)}`;
+          this.sessions.delete(ownerId);
+          existing.id = newId;
+          existing.activeRun = null;
+          this.sessions.set(newId, existing);
+          this.writableCwdOwners.set(workdir, newId);
+          existing.state = 'idle';
+          this.log('recycled idle writable session with new_session', { oldId: ownerId, newId, cwd: workdir });
+          onSession?.(existing);
+          if (signal?.aborted) {
+            throw new Error('Run aborted before prompt start');
+          }
+          return existing.startPrompt(prompt, wait_ms, allowedPaths, thinking ?? 'medium', { signal });
+        }
+        await existing.close();
+        if (this.writableCwdOwners.has(workdir)) {
+          const raceOwner = this.writableCwdOwners.get(workdir);
+          throw new Error(`Workspace ${workdir} already has an active writable session (${raceOwner})`);
+        }
+      }
     }
+
     const piBin = resolvePiBinary();
     const evictPromise = this.#evictLruSlotSync();
     const id = `pi-${randomUUID().slice(0, 8)}`;
@@ -671,6 +762,9 @@ export class SessionPool {
     try {
       if (evictPromise) {
         await evictPromise;
+      }
+      if (signal?.aborted) {
+        throw new Error('Run aborted before session spawn');
       }
       sess = new PiSession({
         id,
@@ -687,7 +781,8 @@ export class SessionPool {
       this.sessions.set(id, sess);
       this.pendingSpawns -= 1;
       reserved = false;
-      return await sess.startPrompt(prompt, wait_ms, allowedPaths);
+      onSession?.(sess);
+      return await sess.startPrompt(prompt, wait_ms, allowedPaths, undefined, { signal });
     } catch (err) {
       if (sess) {
         await sess.close();
@@ -705,15 +800,24 @@ export class SessionPool {
   listSessions() {
     const list = [];
     for (const s of this.sessions.values()) {
-      list.push({
+      const entry = {
         session_id: s.id,
+        pid: s.proc?.pid ?? null,
         cwd: s.cwd,
         state: s.state,
         thinking: s.thinking,
         readonly: s.readonly,
         model: s.model,
         last_activity_ms_ago: Date.now() - s.lastActivityAt,
-      });
+      };
+      if ((s.state === 'running' || s.state === 'aborting') && s.activeRun && !s.activeRun.settled) {
+        entry.active_run = {
+          elapsed_ms: Date.now() - s.activeRun.startedAt,
+          tools_count: s.activeRun.toolsUsed.length,
+          recent_tools: s.activeRun.toolsUsed.slice(-10),
+        };
+      }
+      list.push(entry);
     }
     return { sessions: list };
   }
@@ -726,12 +830,17 @@ export class SessionPool {
       return { closed: [sessionId] };
     }
     const ids = Array.from(this.sessions.keys());
-    await this.closeAll();
+    await this.closeAllSessions();
     return { closed: ids };
   }
 
-  async closeAll() {
+  async closeAllSessions() {
     const all = Array.from(this.sessions.values());
     await Promise.all(all.map((s) => s.close()));
+  }
+
+  async closeAll() {
+    clearInterval(this.idleSweep);
+    await this.closeAllSessions();
   }
 }

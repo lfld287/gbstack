@@ -19,34 +19,27 @@ ROLE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,23}")
 NATIVE_FALLBACK_FLAGS = ("fallbackToNativeOnPreflightFail", "fallbackToNativeOnTransientFailure")
 CLI_VARIANTS = ("rework", "fallback")
 CLI_BINARY_BOUND_FIELDS = (
-    "fallbackBinaries", "args", "nonGitArgs", "extraDirArgs", "stdinArg", "promptPrefixArgs", "env", "preflight",
+    "fallbackBinaries", "args", "nonGitArgs", "extraDirArgs", "sessionArgs", "newSessionArgs",
+    "stdinArg", "promptPrefixArgs", "env", "preflight",
 )
 CLI_VARIANT_FIELDS = (
     "provider", "binary", "fallbackBinaries", "args", "nonGitArgs", "extraDirArgs",
-    "promptInput", "stdinArg", "promptPrefixArgs", "env", "timeoutSeconds", "preflight",
-    "outerModel", "outerLowQuotaFallback",
+    "sessionArgs", "newSessionArgs", "promptInput", "stdinArg", "promptPrefixArgs", "env",
+    "timeoutSeconds", "preflight", "outerModel", "outerLowQuotaFallback",
 )
 CLI_PREFLIGHT_FIELDS = ("command", "outputContains", "env", "timeoutSeconds")
-MCP_DEFAULT_SERVER = "gbstack_pi-rpc"
-MCP_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
-MCP_VARIANT_FIELDS = (
-    "provider", "server", "model", "thinking", "waitMs",
-    "outerModel", "outerLowQuotaFallback",
-)
 FIELDS = {
     (): ("schemaVersion", "roles", "reviews", "slots"),
     ("slots",): ROLE_SLOTS + REVIEW_SLOTS,
     ("roles", "*"): (
         "description", "prompt", "skill", "readonly", "workspace", "concurrentWorkspace",
-        "mode", "native", "cli", "mcp",
+        "mode", "native", "cli",
     ),
     ("roles", "*", "native"): ("provider", "model", "reworkModel", "lowQuotaFallback", "lowQuotaFallbackProvider"),
     ("roles", "*", "cli"): CLI_VARIANT_FIELDS + NATIVE_FALLBACK_FLAGS + CLI_VARIANTS,
     ("roles", "*", "cli", "preflight"): CLI_PREFLIGHT_FIELDS,
     **{("roles", "*", "cli", variant): CLI_VARIANT_FIELDS for variant in CLI_VARIANTS},
     **{("roles", "*", "cli", variant, "preflight"): CLI_PREFLIGHT_FIELDS for variant in CLI_VARIANTS},
-    ("roles", "*", "mcp"): MCP_VARIANT_FIELDS + ("fallbackToNativeOnTransientFailure",) + CLI_VARIANTS,
-    **{("roles", "*", "mcp", variant): MCP_VARIANT_FIELDS for variant in CLI_VARIANTS},
     ("reviews", "*"): (
         "description", "members", "requireDistinctProviders", "minDistinctProviders",
         "allowSameProviderFallback", "onMissingProvider", "onIncomplete", "maxRounds",
@@ -250,6 +243,12 @@ class Resolver:
                     field,
                     "role field 'codex' was replaced by 'cli' in schemaVersion 2; migrate 'codex' to 'cli'",
                 )
+            if len(path) == 2 and path[0] == "roles" and key == "mcp":
+                raise ConfigError(
+                    source,
+                    field,
+                    "role field 'mcp' was removed; migrate to mode 'cli' with '{pluginRoot}/scripts/pi-rpc-ctl.sh'",
+                )
             if allowed is not None and key not in allowed:
                 raise ConfigError(source, field, "unknown key")
             if (
@@ -257,7 +256,7 @@ class Resolver:
                 and not self.allow_project_cli
                 and len(path) == 2
                 and path[0] == "roles"
-                and key in ("cli", "mcp")
+                and key == "cli"
                 and new is not None
             ):
                 raise ConfigError(
@@ -397,11 +396,15 @@ class Resolver:
         mode = self.expect(role, path, "mode", str)
         if mode == "codex":
             self.invalid(mode_field, "mode 'codex' was replaced by 'cli' in schemaVersion 2; migrate mode to 'cli'")
-        if mode not in ("native", "cli", "mcp"):
-            self.invalid(mode_field, "expected 'native', 'cli', or 'mcp'")
+        if mode == "mcp":
+            self.invalid(
+                mode_field,
+                "mode 'mcp' was removed; migrate mode to 'cli' with '{pluginRoot}/scripts/pi-rpc-ctl.sh'",
+            )
+        if mode not in ("native", "cli"):
+            self.invalid(mode_field, "expected 'native' or 'cli'")
         native = self.expect(role, path, "native", dict, optional=mode != "native", extra_origins=(mode_field,))
         cli_cfg = self.expect(role, path, "cli", dict, optional=mode != "cli", extra_origins=(mode_field,))
-        mcp_cfg = self.expect(role, path, "mcp", dict, optional=mode != "mcp", extra_origins=(mode_field,))
         resolved = dict(role)
         if native is not None:
             native_path = (*path, "native")
@@ -415,8 +418,6 @@ class Resolver:
                 resolved["native"]["reworkModel"] = model
         if cli_cfg is not None:
             resolved["cli"] = self.resolve_cli(role_id, cli_cfg, mode, native)
-        if mcp_cfg is not None:
-            resolved["mcp"] = self.resolve_mcp(role_id, mcp_cfg, mode, native)
         prompt = role.get("prompt", f"{role_id}.md")
         prompt_path, prompt_source = self.resolve_prompt(prompt, (*path, "prompt"))
         return dict(
@@ -480,6 +481,8 @@ class Resolver:
         args = self.expect_str_list(cli_cfg, path, "args", nonempty_items=False)
         non_git_args = self.expect_str_list(cli_cfg, path, "nonGitArgs", nonempty_items=False)
         extra_dir_args = self.expect_str_list(cli_cfg, path, "extraDirArgs", nonempty_items=False)
+        session_args = self.expect_str_list(cli_cfg, path, "sessionArgs", nonempty_items=True)
+        new_session_args = self.expect_str_list(cli_cfg, path, "newSessionArgs", nonempty_items=True)
         prompt_input = self.expect(cli_cfg, path, "promptInput", str, optional=optional, extra_origins=mode_origins)
         if prompt_input is not None and prompt_input not in ("stdin", "arg"):
             self.invalid((*path, "promptInput"), "expected 'stdin' or 'arg'")
@@ -516,52 +519,10 @@ class Resolver:
         self.expect(cli_cfg, path, "outerLowQuotaFallback", str, optional=True)
         return dict(
             cli_cfg, fallbackBinaries=fallback_binaries, args=args, nonGitArgs=non_git_args,
-            extraDirArgs=extra_dir_args, promptPrefixArgs=prompt_prefix_args, env=env,
+            extraDirArgs=extra_dir_args, sessionArgs=session_args, newSessionArgs=new_session_args,
+            promptPrefixArgs=prompt_prefix_args, env=env,
             timeoutSeconds=timeout_seconds, preflight=preflight,
         )
-
-    def resolve_mcp(self, role_id, mcp_cfg, mode, native):
-        path = ("roles", role_id, "mcp")
-        normalized = self._normalize_mcp_fields(mcp_cfg, path, mode)
-        flag_value = self.expect(mcp_cfg, path, "fallbackToNativeOnTransientFailure", bool, optional=True)
-        if flag_value and native is None:
-            field = (*path, "fallbackToNativeOnTransientFailure")
-            self.invalid(
-                field,
-                "requires a native configuration",
-                self.latest_source(field, ("roles", role_id, "native")),
-            )
-        normalized["fallbackToNativeOnTransientFailure"] = bool(flag_value)
-        for variant in CLI_VARIANTS:
-            override = self.expect(mcp_cfg, path, variant, dict, optional=True)
-            normalized[variant] = self._normalize_mcp_profile(normalized, override, (*path, variant), mode)
-        return normalized
-
-    def _normalize_mcp_profile(self, base, override, path, mode):
-        if override is None:
-            return None
-        profile = {key: base[key] for key in MCP_VARIANT_FIELDS if key in base}
-        profile.update(override)
-        if profile.get("server") is None:
-            profile["server"] = base["server"]
-        return self._normalize_mcp_fields(profile, path, mode)
-
-    def _normalize_mcp_fields(self, mcp_cfg, path, mode):
-        optional = mode != "mcp"
-        mode_origins = ((*path[:2], "mode"),) if not optional else ()
-        self.expect(mcp_cfg, path, "provider", str, optional=optional, extra_origins=mode_origins)
-        server = self.expect(mcp_cfg, path, "server", str, optional=True)
-        if server is None:
-            server = MCP_DEFAULT_SERVER
-        self.expect(mcp_cfg, path, "model", str, optional=True)
-        thinking = self.expect(mcp_cfg, path, "thinking", str, optional=True)
-        if thinking is not None and thinking not in MCP_THINKING_LEVELS:
-            levels = ", ".join(repr(level) for level in MCP_THINKING_LEVELS)
-            self.invalid((*path, "thinking"), f"expected one of {levels}")
-        wait_ms = self.expect_positive_int(mcp_cfg, path, "waitMs", default=None)
-        self.expect(mcp_cfg, path, "outerModel", str, optional=True)
-        self.expect(mcp_cfg, path, "outerLowQuotaFallback", str, optional=True)
-        return dict(mcp_cfg, server=server, thinking=thinking, waitMs=wait_ms)
 
     def resolve_review(self, review_id, review):
         path = ("reviews", review_id)
@@ -644,7 +605,7 @@ class Resolver:
             member_options = {member: {provider} for member, provider in providers.items()}
             for member, role in member_roles.items():
                 mode_key = role["mode"]
-                if mode_key in ("cli", "mcp"):
+                if mode_key == "cli":
                     member_options[member].update(
                         role[mode_key][variant]["provider"]
                         for variant in CLI_VARIANTS
@@ -653,7 +614,7 @@ class Resolver:
 
             for member, role in member_roles.items():
                 mode_key = role["mode"]
-                if mode_key not in ("cli", "mcp"):
+                if mode_key != "cli":
                     continue
                 for variant in CLI_VARIANTS:
                     profile = role[mode_key][variant]
@@ -694,7 +655,7 @@ class Resolver:
                                         ),
                                         None,
                                     )
-                                    if other_mode in ("cli", "mcp")
+                                    if other_mode == "cli"
                                     else None
                                 )
                                 if matched_variant is not None:

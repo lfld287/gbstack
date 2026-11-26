@@ -85,4 +85,4 @@ fi
 NODE_DIR="$(dirname -- "$NODE_BIN")"
 export PATH="${NODE_DIR}${PATH:+:${PATH}}"
 
-exec "$NODE_BIN" "$SCRIPT_DIR/mcp/pi-rpc-server.mjs" "$@"
+exec "$NODE_BIN" "$SCRIPT_DIR/rpc/pi-rpc-ctl.mjs" "$@"

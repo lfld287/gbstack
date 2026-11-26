@@ -58,7 +58,9 @@ def resolve_workdir(cwd_value):
 
 def resolve_binary(cli_cfg, role_id):
     candidates = [cli_cfg["binary"], *cli_cfg.get("fallbackBinaries", [])]
-    for candidate in candidates:
+    plugin_root = str(resolve_roles.PLUGIN_ROOT)
+    for raw_candidate in candidates:
+        candidate = raw_candidate.replace("{pluginRoot}", plugin_root)
         if "/" in candidate or candidate.startswith("~"):
             try:
                 path = Path(candidate).expanduser()
@@ -77,10 +79,16 @@ def resolve_binary(cli_cfg, role_id):
     return None
 
 
-def substitute_placeholders(text, *, binary, workdir, extra_dir=None):
-    result = text.replace("{binary}", binary).replace("{workdir}", workdir)
+def substitute_placeholders(text, *, binary, workdir, extra_dir=None, session_id=None):
+    result = (
+        text.replace("{binary}", binary)
+        .replace("{workdir}", workdir)
+        .replace("{pluginRoot}", str(resolve_roles.PLUGIN_ROOT))
+    )
     if extra_dir is not None:
         result = result.replace("{dir}", extra_dir)
+    if session_id is not None:
+        result = result.replace("{session_id}", session_id)
     return result
 
 
@@ -316,6 +324,8 @@ def parse_run_args(argv):
     add_resolver_arguments(parser, cwd_required=True)
     parser.add_argument("--profile", choices=CLI_PROFILES, default="default")
     parser.add_argument("--add-dir", action="append", default=[], metavar="DIR")
+    parser.add_argument("--session-id", metavar="ID")
+    parser.add_argument("--new-session", action="store_true")
     parser.add_argument("--timeout", type=int, metavar="SEC")
     parser.add_argument("--baseline-json", metavar="JSON")
     parser.add_argument("--max-output-bytes", type=int, default=DEFAULT_MAX_OUTPUT_BYTES, metavar="N")
@@ -624,6 +634,16 @@ def run_cli_command(argv):
     if args.add_dir and not cli_cfg["extraDirArgs"]:
         print(f"Error: role {role['id']!r} does not configure extraDirArgs for --add-dir", file=sys.stderr)
         return 2
+    if args.session_id is not None:
+        if not args.session_id:
+            print("Error: --session-id must not be empty", file=sys.stderr)
+            return 2
+        if not cli_cfg["sessionArgs"]:
+            print(f"Error: role {role['id']!r} does not configure sessionArgs for --session-id", file=sys.stderr)
+            return 2
+    if args.new_session and not cli_cfg["newSessionArgs"]:
+        print(f"Error: role {role['id']!r} does not configure newSessionArgs for --new-session", file=sys.stderr)
+        return 2
 
     cmd = [binary_path]
     cmd.extend(
@@ -640,6 +660,16 @@ def run_cli_command(argv):
         cmd.extend(
             substitute_placeholders(part, binary=binary_path, workdir=str(workdir), extra_dir=extra_dir_val)
             for part in cli_cfg["extraDirArgs"]
+        )
+    if args.session_id is not None:
+        cmd.extend(
+            substitute_placeholders(part, binary=binary_path, workdir=str(workdir), session_id=args.session_id)
+            for part in cli_cfg["sessionArgs"]
+        )
+    if args.new_session:
+        cmd.extend(
+            substitute_placeholders(part, binary=binary_path, workdir=str(workdir))
+            for part in cli_cfg["newSessionArgs"]
         )
 
     if cli_cfg["promptInput"] == "stdin":

@@ -16,6 +16,14 @@ import { truncateUtf8 } from './protocol.mjs';
 
 const ALLOWED_BASELINE_KEYS = new Set(['gitCleanHead', 'fileSha1', 'plannedNew', 'allowedPaths']);
 
+export class ValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValidationError';
+    this.code = 'INVALID_PARAMS';
+  }
+}
+
 function expandHome(p) {
   if (p === '~') return homedir();
   if (p.startsWith('~/')) return path.join(homedir(), p.slice(2));
@@ -27,18 +35,18 @@ function expandHome(p) {
  */
 export function resolveWorkdir(cwd) {
   if (typeof cwd !== 'string' || !cwd.trim()) {
-    throw new Error('cwd must be a non-empty string');
+    throw new ValidationError('cwd must be a non-empty string');
   }
   const expanded = expandHome(cwd);
   let resolved;
   try {
     resolved = realpathSync(expanded);
   } catch (err) {
-    throw new Error(`Invalid cwd ${JSON.stringify(cwd)}: ${err.message}`);
+    throw new ValidationError(`Invalid cwd ${JSON.stringify(cwd)}: ${err.message}`);
   }
   const st = statSync(resolved);
   if (!st.isDirectory()) {
-    throw new Error(`cwd is not a directory: ${resolved}`);
+    throw new ValidationError(`cwd is not a directory: ${resolved}`);
   }
   return resolved;
 }
@@ -65,19 +73,19 @@ export function detectGitWorktree(workdir) {
 
 function validateSafeRelpath(relpath, fieldName, { allowDot = false } = {}) {
   if (typeof relpath !== 'string' || !relpath) {
-    throw new Error(`${fieldName} path must be a nonempty string`);
+    throw new ValidationError(`${fieldName} path must be a nonempty string`);
   }
   if (path.posix.isAbsolute(relpath) || path.isAbsolute(relpath) || relpath.includes('\\')) {
-    throw new Error(`${fieldName} path must be relative POSIX path: ${relpath}`);
+    throw new ValidationError(`${fieldName} path must be relative POSIX path: ${relpath}`);
   }
   if (relpath.split('/').includes('..')) {
-    throw new Error(`${fieldName} path cannot contain '..': ${relpath}`);
+    throw new ValidationError(`${fieldName} path cannot contain '..': ${relpath}`);
   }
   const normalized = path.posix.normalize(relpath);
   const parts = normalized.split('/').filter(Boolean);
   if (normalized === '.' || parts.length === 0) {
     if (allowDot) return '.';
-    throw new Error(`${fieldName} path cannot be '.': ${relpath}`);
+    throw new ValidationError(`${fieldName} path cannot be '.': ${relpath}`);
   }
   return parts.join('/');
 }
@@ -126,7 +134,7 @@ function ensureWithinWorkdir(workdir, relpath, fieldName) {
       if (lst.isSymbolicLink()) {
         const resolvedParent = resolvePathAllowMissing(current);
         if (!isWithinDir(workdirResolved, resolvedParent)) {
-          throw new Error(`${fieldName} parent symlink escapes workdir: ${relpath}`);
+          throw new ValidationError(`${fieldName} parent symlink escapes workdir: ${relpath}`);
         }
         current = resolvedParent;
       }
@@ -140,7 +148,7 @@ function ensureWithinWorkdir(workdir, relpath, fieldName) {
   const parentDir = path.dirname(target);
   const resolvedParent = resolvePathAllowMissing(parentDir);
   if (!isWithinDir(workdirResolved, resolvedParent)) {
-    throw new Error(`${fieldName} escapes workdir: ${relpath}`);
+    throw new ValidationError(`${fieldName} escapes workdir: ${relpath}`);
   }
   return target;
 }
@@ -168,59 +176,59 @@ function computeSha1(filePath) {
 export function verifyBaseline(baseline, workdir, inGit) {
   if (baseline === undefined || baseline === null) return null;
   if (typeof baseline !== 'object' || Array.isArray(baseline)) {
-    throw new Error('baseline must be a JSON object');
+    throw new ValidationError('baseline must be a JSON object');
   }
   const unknownKeys = Object.keys(baseline).filter((k) => !ALLOWED_BASELINE_KEYS.has(k));
   if (unknownKeys.length > 0) {
-    throw new Error(`unknown baseline keys: ${unknownKeys.sort().join(', ')}`);
+    throw new ValidationError(`unknown baseline keys: ${unknownKeys.sort().join(', ')}`);
   }
 
   if ('gitCleanHead' in baseline) {
     const expectedHead = baseline.gitCleanHead;
     if (typeof expectedHead !== 'string' || !expectedHead) {
-      throw new Error('baseline.gitCleanHead must be a nonempty string');
+      throw new ValidationError('baseline.gitCleanHead must be a nonempty string');
     }
     if (!inGit) {
-      throw new Error('baseline.gitCleanHead requires a Git worktree');
+      throw new ValidationError('baseline.gitCleanHead requires a Git worktree');
     }
     let actualHead;
     try {
       actualHead = runGit(workdir, ['rev-parse', 'HEAD']).trim();
     } catch (err) {
-      throw new Error(`baseline.gitCleanHead failed to read HEAD: ${err.message}`);
+      throw new ValidationError(`baseline.gitCleanHead failed to read HEAD: ${err.message}`);
     }
     if (actualHead !== expectedHead) {
-      throw new Error(`baseline.gitCleanHead mismatch: expected ${expectedHead}, got ${actualHead}`);
+      throw new ValidationError(`baseline.gitCleanHead mismatch: expected ${expectedHead}, got ${actualHead}`);
     }
     const statusOut = runGit(workdir, ['status', '--porcelain']);
     if (statusOut !== '') {
-      throw new Error('baseline.gitCleanHead failed: Git worktree is not clean');
+      throw new ValidationError('baseline.gitCleanHead failed: Git worktree is not clean');
     }
   }
 
   if ('fileSha1' in baseline) {
     const fileSha1 = baseline.fileSha1;
     if (!fileSha1 || typeof fileSha1 !== 'object' || Array.isArray(fileSha1)) {
-      throw new Error('baseline.fileSha1 must be an object');
+      throw new ValidationError('baseline.fileSha1 must be an object');
     }
     for (const [rawPath, expectedSha1] of Object.entries(fileSha1)) {
       const relpath = validateSafeRelpath(rawPath, 'baseline.fileSha1');
       if (typeof expectedSha1 !== 'string' || !expectedSha1) {
-        throw new Error(`baseline.fileSha1[${relpath}] must be a nonempty string`);
+        throw new ValidationError(`baseline.fileSha1[${relpath}] must be a nonempty string`);
       }
       const target = ensureWithinWorkdir(workdir, relpath, 'baseline.fileSha1');
       let lst;
       try {
         lst = lstatSync(target);
       } catch (err) {
-        throw new Error(`baseline.fileSha1 cannot stat ${relpath}: ${err.message}`);
+        throw new ValidationError(`baseline.fileSha1 cannot stat ${relpath}: ${err.message}`);
       }
       if (lst.isSymbolicLink() || !lst.isFile()) {
-        throw new Error(`baseline.fileSha1 missing regular file: ${relpath}`);
+        throw new ValidationError(`baseline.fileSha1 missing regular file: ${relpath}`);
       }
       const actualSha1 = computeSha1(target);
       if (actualSha1 !== expectedSha1.toLowerCase()) {
-        throw new Error(`baseline.fileSha1 mismatch for ${relpath}: expected ${expectedSha1}, got ${actualSha1}`);
+        throw new ValidationError(`baseline.fileSha1 mismatch for ${relpath}: expected ${expectedSha1}, got ${actualSha1}`);
       }
     }
   }
@@ -228,7 +236,7 @@ export function verifyBaseline(baseline, workdir, inGit) {
   if ('plannedNew' in baseline) {
     const plannedNew = baseline.plannedNew;
     if (!Array.isArray(plannedNew)) {
-      throw new Error('baseline.plannedNew must be an array');
+      throw new ValidationError('baseline.plannedNew must be an array');
     }
     for (const rawPath of plannedNew) {
       const relpath = validateSafeRelpath(rawPath, 'baseline.plannedNew');
@@ -239,18 +247,18 @@ export function verifyBaseline(baseline, workdir, inGit) {
         exists = true;
       } catch (err) {
         if (err.code !== 'ENOENT') {
-          throw new Error(`baseline.plannedNew cannot check ${relpath}: ${err.message}`);
+          throw new ValidationError(`baseline.plannedNew cannot check ${relpath}: ${err.message}`);
         }
       }
       if (exists) {
-        throw new Error(`baseline.plannedNew already exists: ${relpath}`);
+        throw new ValidationError(`baseline.plannedNew already exists: ${relpath}`);
       }
     }
   }
 
   if ('allowedPaths' in baseline) {
     if (!Array.isArray(baseline.allowedPaths)) {
-      throw new Error('baseline.allowedPaths must be an array');
+      throw new ValidationError('baseline.allowedPaths must be an array');
     }
     return baseline.allowedPaths.map((p) => validateSafeRelpath(p, 'baseline.allowedPaths', { allowDot: true }));
   }
