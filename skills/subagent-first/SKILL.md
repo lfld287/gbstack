@@ -25,9 +25,9 @@ description: >-
 | 槽位 | 剧本或技能中的用途 |
 |---|---|
 | `coordinator` | 顶层 Coordinator |
-| `recon` | `scout` 只读取证 |
+| `recon` | `scout` 本地与远端严格只读取证与诊断（禁任何本地/远端写文件、`/tmp` 脚本、编译或状态变更） |
 | `plan` | `plan` 设计与规划 |
-| `implement` | `worker` 实现与返工 |
+| `implement` | `worker` 覆盖所有改变本地或远端状态的任务（含代码修改、非只读诊断/压测、远端/`/tmp` 脚本等） |
 | `monitor` | `monitor`，仅多路并发写或长耗时多阶段接力时按需启用 |
 | `review` | 常规 Review Gate 和 PR 的独立 `reviewer` |
 | `interrogate` | 对抗审查的 `reviewer` |
@@ -36,7 +36,7 @@ description: >-
 用户可在 `roles.json` 增加、移除或覆盖角色，移除后同步调整引用。自定义角色 ID 可直接通过 `role <id>` 解析并派发。用户显式指定某种外部 CLI 审查（如 `codex`、`pi`、`omp`、`claude`）时，不再通过固定槽位，而是直接按 `resolve-roles.sh role <id>` 或自定义 `review <id>` 解析派发。
 
 - 按解析结果中的 `mode`（`"native"` | `"cli"`）、`readonly`、`workspace` 派发，并发写优先用已配置的 `concurrentWorkspace`，只用 `share` / `branch` 隔离写入。Native 派发显式传 `native.model`。CLI 派发按 `CLI_PROFILE`（`default` | `rework` | `fallback`）显式传生效 profile 的 `outerModel` 作为薄 Swarm 外层模型；未覆写时沿用基础 `cli.outerModel`（内置角色用 `gemini-3.8-flash-medium`）。切换 profile 时同步调整外层模型。外层调用 `<PLUGIN_ROOT>/scripts/run-cli.sh --profile <profile>` 驱动内层 CLI（如 `pi-rpc-ctl.sh` 常驻 daemon CLI，详见 [`../pi-rpc/SKILL.md`](../pi-rpc/SKILL.md)），runner 和外层均不得自行重试或切换 profile。型号不可用时先用 `swarm{action:"models"}` 核对并报告，低配额按第五节切换。成员名使用小写 `[a-z0-9_-]`，最长 24 字符。
-- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: CLI` 或 `执行模式: Native`。CLI 模式另填 `ROLE_ID`、`PLUGIN_ROOT` 和可选的 `CLI_PROFILE: <profile>`（省略时为 `default`），返工复用热会话时附上一轮返回的 `SESSION_ID: <id>`（新独立任务省略或传 `--new-session`），写入任务附 `--baseline-json`（仅允许 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键，未知键会被 `run-cli.sh` 以退出码 `2` 拒绝）及可选 `--add-dir` / `--timeout`，外层隔离写先 `pwd` 取 `--cwd`。
+- Brief 开头附非空的 `promptPath` 绝对路径，并要求成员先读该文件。写明 `执行模式: CLI` 或 `执行模式: Native`。`recon`（`scout`）仅限本地与远端均严格只读的侦察、取证与纯只读复现；所有会改变本地或远端状态的任务（包括非只读诊断/压测、在 `/tmp` 或远端写一次性脚本/preload、临时实验构建等，即使不修改本地仓库代码）均须按 `implement`（`worker`）生效模式派发，并在 brief 中明确远端或 `/tmp` 授权范围。若要求本地仓库零改动，可在 `--baseline-json` 中传入 `allowedPaths: []`，`run_cli.py` 会将任何本地仓库变动判为越界（`outOfScopeFiles`）以确保本地仓库零改动。CLI 模式另填 `ROLE_ID`、`PLUGIN_ROOT` 和可选的 `CLI_PROFILE: <profile>`（省略时为 `default`），返工复用热会话时附上一轮返回的 `SESSION_ID: <id>`（新独立任务省略或传 `--new-session`），写入任务附 `--baseline-json`（仅允许 `gitCleanHead`、`fileSha1`、`plannedNew`、`allowedPaths` 四个键，未知键会被 `run-cli.sh` 以退出码 `2` 拒绝）及可选 `--add-dir` / `--timeout`，外层隔离写先 `pwd` 取 `--cwd`。
 - 解析结果的 `requiresCliPreflight` 为真时，在派发前对每个实际使用的 CLI 角色（`cliRoles`）或审查组执行只读预检：运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' (--role <ROLE_ID> | --review <REVIEW_ID> | --all) [--profile <profile>]`。`--profile` 支持 `default`（缺省）、`rework`、`fallback`、`all`；`--review` 必须传 `slot` 解析出的 `review.id`（不可直接传槽位名）。退出码语义：`0` 通过、`1` 预检或配置失败、`2` 参数错误或显式指定的角色未配置 fallback、`3` 缺失或已禁用、`127` 找不到可执行文件（生效 profile 的 `binary` 及 `fallbackBinaries`）。显式使用 `--role <ROLE_ID> --profile fallback` 时，若该角色未配置 `cli.fallback`，退出 `2`。批量使用 `--review <REVIEW_ID>` 或 `--all` 搭配 `--profile fallback` 时，只预检目标范围内已配置 `cli.fallback` 的 CLI 角色，跳过未配置的角色；若没有符合条件的角色，输出跳过提示并退出 `0`。同会话按 `(ROLE_ID, profile)` 缓存通过结果，切到未检组合、报错或环境变化时重检。跳过的角色不得记入 `(ROLE_ID, fallback)` 预检通过缓存。
 - 预检失败先报告具体缺项与退出码，再按顺序处理：① 已配置 `cli.fallback`、当前未在用 `fallback`，且用户未锁定主工具/主模型时，先运行 `<PLUGIN_ROOT>/scripts/preflight-cli.sh --cwd '<WORKDIR>' --role <ROLE_ID> --profile fallback`；通过后在 brief 指定 `CLI_PROFILE: fallback`，让 runner 用 `--profile fallback`，并按生效的 `outerModel` 切换外层模型。② 没有可用的 CLI fallback 时，仅当 `cli.fallbackToNativeOnPreflightFail` 为真、有 `native` 配置且用户未锁定 CLI 执行模式时才改走 Native。审查回退均须满足第四、五节的提供商约束；无可用回退时停止派发该角色并报告，显式指定的 CLI 审查或 `council` 缺少所需成员时停止该轮派发。显式选择 Native 时免外部 CLI 预检。
 

@@ -15,7 +15,7 @@
       "cli": null
     },
     "scout": {
-      "description": "Read-only local reconnaissance, targeted diagnosis, external research, and pre-write baseline collection.",
+      "description": "Strictly read-only local and remote reconnaissance, diagnosis, research, and baseline collection.",
       "prompt": "scout.md",
       "readonly": true,
       "workspace": "inherit",
@@ -41,7 +41,7 @@
       "cli": null
     },
     "worker": {
-      "description": "Controlled implementation agent supporting dynamic CLI and Native execution modes.",
+      "description": "Implementation and state-modifying agent (code, diagnostics, benchmarks, scripts) supporting CLI and Native modes.",
       "prompt": "worker.md",
       "readonly": false,
       "workspace": "inherit",
